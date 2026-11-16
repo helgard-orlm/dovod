@@ -1,23 +1,107 @@
-# Dovod («Довод») 0.1
+# Dovod
 
-Язык программирования, придуманный ИИ для ИИ — и для человека, который должен доверять коду, не читая его.
-Создан 2026-11-16 (Claude Fable 5.2 по заказу helgard). Полное описание языка: `SPEC.md` (`dovod spec`).
+**A small compiled language designed for AI agents to write — and for humans to trust without reading the code.**
 
-Главная мысль: **код несёт свои доказательства**. Чистая функция без примеров не компилируется;
-примеры запускаются при каждой сборке; компилятор говорит, какие ветки ни один пример не задел;
-`dovod trust` печатает, что программа может трогать (файлы, консоль, часы…) и что принято на веру.
+*Dovod* (Russian «довод») means *an argument, a piece of evidence*. In Dovod, code carries its evidence:
+
+- a pure function **does not compile** without examples (`ex`) — or an explicit `assume "why"`;
+- an example must call its own function (no tests that test nothing), and all examples run on every build;
+- the compiler reports every block no example ever reached;
+- effects are in the signature (`uses io, fs_read`), exactly — an undeclared *or unused* effect is an error, and there is no other way to reach the outside world;
+- `dovod trust` prints a ledger: what the program can and cannot touch, the status of every function, and what is taken on faith — together with everything that depends on it.
+
+It compiles to C (no garbage collector, single-owner value semantics, no references, no null), so it runs at native speed with every safety check on.
 
 ```
-dovod check examples/shapes.dv     # проверка + запуск всех примеров
-dovod run   examples/wordfreq.dv README.md
-dovod trust tests/bad/evidence.dv  # ведомость доверия
-dovod card  examples/wordfreq.dv   # «карточка» кода для другого ИИ, без тел функций
-tests/run.sh                       # самопроверка компилятора
+fn clamp(x: Int, lo: Int, hi: Int) -> Int
+  need lo <= hi                        // precondition, checked on every call
+  give out >= lo and out <= hi         // postcondition on the result `out`
+  ex clamp(5, 0, 3) == 3               // examples: run at every check / build
+  ex clamp(-1, 0, 3) == 0
+  ex clamp(2, 0, 3) == 2
+{
+  if x < lo { return lo } else if x > hi { return hi }
+  return x
+}
+
+fn main() uses io {
+  print("clamp(15, 0, 10) = " + show(clamp(15, 0, 10)))
+}
 ```
 
-Устройство: `dovod/syntax.py` (разбор) → `dovod/check.py` (типы, эффекты, правила доказательств) →
-`dovod/cgen.py` (перевод в C, владение памятью без сборщика мусора) → `cc`. Нужны Python 3 и gcc/clang.
+## Why
 
-Замер 16.11.2026, Parrot (N100), `examples/bench.dv` против `bench.py` (Python 3.13), 1 прогон:
-решето 5e6 — 25 мс против 590; Коллатц до 1e6 — 298 мс против 10061; сборка текста — 113 против 145.
-Все проверки (переполнение, границы списков, контракты) при этом включены.
+An AI writes code faster than anyone can check it. So the language makes checking the default rather than an afterthought, and it is shaped around how a model actually fails:
+
+| An AI author…                                   | …so Dovod                                                                 |
+|-------------------------------------------------|---------------------------------------------------------------------------|
+| writes fast; checking is the bottleneck         | every pure function must carry examples; the compiler runs them           |
+| can write tests that test nothing               | an example must call its own function; unreached branches are reported    |
+| reads code in fragments                         | no globals, no references, no hidden effects: a signature tells all       |
+| makes small slips (wrong name, missed case)     | no shadowing, no unused names, exhaustive `match`, no implicit conversion |
+| hands code to a human who will not read it      | `dovod trust` prints what the program can touch and what is taken on faith|
+| has never seen this language                    | one way to do each thing; the whole spec is one 9 KB file                 |
+
+Every diagnostic has a `file:line:col`, a stable code and usually a concrete `fix:`; `--json` gives the same to a machine.
+
+```
+slips.dv:18:5: E-NAME: unknown name `totl`
+    fix: did you mean `total`?
+slips.dv:24:3: E-EFFECT: `loud` does `io` (read/write the console) but does not declare it
+    fix: add `uses io` to `fn loud` — or move this out of a pure function
+evidence.dv:3:14: E-EXAMPLE: example failed: `sign(0) == 1` — got 0, expected 1
+```
+
+Trust ledger:
+
+```
+$ dovod trust tests/bad/evidence.dv
+  can:    read/write the console (io)
+  cannot: read files; write files; read command-line arguments; read the clock; use randomness; network; run other programs
+
+  function       status    examples  blocks  notes
+  sign           partial   2/2       2/3     never ran: line 7 (if)
+  fast_inv_sqrt  assumed   -         -       ASSUMED: "accurate to 1e-6 for x in 0.01..100; checked by hand against a table"
+  norm           tested    1/1       1/1     rests on assumed: fast_inv_sqrt
+  main           shell     -         -       effects: io; rests on assumed: fast_inv_sqrt
+  taken on faith:
+    - fast_inv_sqrt: "..."  -> affects: norm, main
+```
+
+## Use
+
+Needs Python 3.10+ and a C compiler (`cc`: gcc or clang).
+
+```
+bin/dovod check examples/shapes.dv          # static checks + run all examples
+bin/dovod run   examples/wordfreq.dv README.md
+bin/dovod build examples/bench.dv -o bench  # native binary
+bin/dovod trust tests/bad/evidence.dv       # the ledger
+bin/dovod card  examples/wordfreq.dv        # interface only, to hand to another agent
+bin/dovod spec                              # the whole language
+tests/run.sh                                # compiler self-test (incl. ASan/UBSan/leak check)
+```
+
+The full language is in [SPEC.md](SPEC.md) — designed to be read once, in one context window.
+
+## Speed
+
+`examples/bench.dv` vs the same code in `examples/bench.py` (Python 3.13), Intel N100, one run, all Dovod checks (overflow, bounds, contracts) on:
+
+| task                         | Dovod  | Python   |
+|------------------------------|--------|----------|
+| prime sieve to 5,000,000     | 25 ms  | 590 ms   |
+| longest Collatz below 1e6    | 298 ms | 10061 ms |
+| building 2M number strings   | 113 ms | 145 ms   |
+
+## Status
+
+Version 0.1, an experiment. Not in it yet: maps, generics, closures, namespaces, network/process effects, Unicode-aware text indexing (`Text` is indexed by bytes), proofs beyond examples. Related work that shares ideas: Vera (contracts + Z3 for LLM-written code), Hylo (mutable value semantics), Koka (effect types).
+
+Implementation: `dovod/syntax.py` (lexer, parser) → `dovod/check.py` (types, effects, evidence rules) → `dovod/cgen.py` (C backend with ownership) → `cc`. ~2,600 lines.
+
+Designed and built by Claude (Anthropic) at the request of [helgard-orlm](https://github.com/helgard-orlm).
+
+## License
+
+MIT
