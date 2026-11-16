@@ -214,10 +214,27 @@ static LONG WINAPI dv_ble_crash(EXCEPTION_POINTERS* ep) {   // no cs here: the c
         }
         snprintf(where, sizeof where, " in %s+0x%llx", base, (unsigned long long)(addr - (char*)m));
     }
-    char b[512];
+    char twhere[200] = "";
+    if (target) {
+        HMODULE tm = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               target, &tm) && tm) {
+            char p2[MAX_PATH * 2];
+            DWORD n2 = GetModuleFileNameA(tm, p2, sizeof p2);
+            if (n2 && n2 < sizeof p2) {
+                const char* c2 = p2 + n2;
+                while (c2 > p2 && c2[-1] != '\\' && c2[-1] != '/') { c2--; }
+                snprintf(twhere, sizeof twhere, " target in %s+0x%llx", c2,
+                         (unsigned long long)(target - (char*)tm));
+            }
+        } else {
+            snprintf(twhere, sizeof twhere, " target unmapped (heap or garbage)");
+        }
+    }
+    char b[768];
     int len = snprintf(b, sizeof b,
-        "CRASH code=%08lx thread=%lu %s addr=%p target=%p%s\n",
-        (unsigned long)code, (unsigned long)GetCurrentThreadId(), rw, addr, target, where);
+        "CRASH code=%08lx thread=%lu %s addr=%p%s%s\n",
+        (unsigned long)code, (unsigned long)GetCurrentThreadId(), rw, addr, where, twhere);
     if (dv_ble_lf != INVALID_HANDLE_VALUE && len > 0) {
         DWORD w = 0;
         WriteFile(dv_ble_lf, b, (DWORD)len, &w, NULL);
@@ -313,10 +330,25 @@ static void dv_ble_uuid(dv_buf* b, const GUID* g) {
 // ---- the two handlers: COM objects made in C --------------------------------------------
 
 typedef struct { const void** vtbl; } dv_ble_hobj;
+static dv_ble_hobj dv_ble_recv_obj, dv_ble_stop_obj;   // defined below, with their vtables
 
 static ULONG  WINAPI dv_ble_h_add(void* self)  { (void)self; return 1; }   // static objects: never freed
 static ULONG  WINAPI dv_ble_h_rel(void* self)  { (void)self; return 1; }
-static HRESULT WINAPI dv_ble_h_iids(void* self, ULONG* n, IID** ids) { (void)self; if (n) *n = 0; if (ids) *ids = NULL; return S_OK; }
+// the honest answer: a real array (the caller frees it with CoTaskMemFree). The old
+// "S_OK, count 0, pointer NULL" is legal COM — but their delivery code read through the
+// NULL (crash: read at 0x10), so no more empty answers.
+static HRESULT WINAPI dv_ble_h_iids(void* self, ULONG* n, IID** ids) {
+    if (!n || !ids) return E_POINTER;
+    IID* a = (IID*)CoTaskMemAlloc(sizeof(IID) * 4);
+    if (!a) { *n = 0; *ids = NULL; return E_OUTOFMEMORY; }
+    a[0] = dv_ble_iid_unknown;
+    a[1] = dv_ble_iid_inspect;
+    a[2] = (self == (void*)&dv_ble_recv_obj) ? dv_ble_iid_teh_recv : dv_ble_iid_teh_stop;
+    a[3] = dv_ble_iid_agile;
+    *n = 4;
+    *ids = a;
+    return S_OK;
+}
 static HRESULT WINAPI dv_ble_h_trust(void* self, TrustLevel* t) { (void)self; if (t) *t = 0; return S_OK; }
 static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
     (void)self;
@@ -325,25 +357,33 @@ static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
     return WindowsCreateString(n, (UINT32)(sizeof n / 2 - 1), out);
 }
 
+static volatile LONG dv_ble_qidbg = 24;   // the first N QI calls get a trace
+
 static HRESULT WINAPI dv_ble_qi_recv(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
-    if (IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
-        IsEqualIID(riid, &dv_ble_iid_teh_recv) || IsEqualIID(riid, &dv_ble_iid_agile)) {
-        if (riid && IsEqualIID(riid, &dv_ble_iid_teh_recv) && dv_ble_dbg > 0) {
-            char w[80];
-            snprintf(w, sizeof w, "delivery: source QI recv handler riid=%08lx", (unsigned long)riid->Data1);
-            dv_ble_say(w);
-        }
-        *out = self;
-        return S_OK;
+    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
+               IsEqualIID(riid, &dv_ble_iid_teh_recv) || IsEqualIID(riid, &dv_ble_iid_agile);
+    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) {
+        char w[96];
+        snprintf(w, sizeof w, "qi recv riid=%08lx -> %s",
+                 riid ? (unsigned long)riid->Data1 : 0, hit ? "S_OK" : "E_NOINTERFACE");
+        dv_ble_say(w);
     }
+    if (hit) { *out = self; return S_OK; }
     return E_NOINTERFACE;
 }
 
 static HRESULT WINAPI dv_ble_qi_stop(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
-    if (IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
-        IsEqualIID(riid, &dv_ble_iid_teh_stop) || IsEqualIID(riid, &dv_ble_iid_agile)) { *out = self; return S_OK; }
+    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
+               IsEqualIID(riid, &dv_ble_iid_teh_stop) || IsEqualIID(riid, &dv_ble_iid_agile);
+    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) {
+        char w[96];
+        snprintf(w, sizeof w, "qi stop riid=%08lx -> %s",
+                 riid ? (unsigned long)riid->Data1 : 0, hit ? "S_OK" : "E_NOINTERFACE");
+        dv_ble_say(w);
+    }
+    if (hit) { *out = self; return S_OK; }
     return E_NOINTERFACE;
 }
 
@@ -507,7 +547,10 @@ static bool dv_ble_scan_start(bool active) {
     dv_ble_ensure();
     if (dv_ble_w) { dv_ble_scan_stop(); }            // restart cleanly (e.g. after a spontaneous "off")
     dv_ble_ensure();
-    dv_ble_say("scan_start");
+    { char w[192];
+      snprintf(w, sizeof w, "scan_start: image=%p recv_obj=%p recv_vt=%p stop_obj=%p",
+               (void*)GetModuleHandleA(NULL), (void*)&dv_ble_recv_obj, (void*)dv_ble_recv_vt, (void*)&dv_ble_stop_obj);
+      dv_ble_say(w); }
     if (!dv_ble_ro) {
         HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
         if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) { return false; }

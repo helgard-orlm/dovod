@@ -40,7 +40,7 @@ module ble
 effect ble "listen to Bluetooth Low Energy advertisements of nearby devices (their addresses, names, signal strength); in active mode also send scan requests for names"
 native "ble.h"
   targets win64
-  links "-lruntimeobject", "-lmincore" on win64
+  links "-lruntimeobject", "-lmincore", "-lole32" on win64
 
 enum BleEv {
   BleTick                                     // nothing was heard within the wait
