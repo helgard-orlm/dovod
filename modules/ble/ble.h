@@ -338,6 +338,7 @@ static ULONG  WINAPI dv_ble_h_rel(void* self)  { (void)self; return 1; }
 // "S_OK, count 0, pointer NULL" is legal COM — but their delivery code read through the
 // NULL (crash: read at 0x10), so no more empty answers.
 static HRESULT WINAPI dv_ble_h_iids(void* self, ULONG* n, IID** ids) {
+    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetIids asked"); }
     if (!n || !ids) return E_POINTER;
     IID* a = (IID*)CoTaskMemAlloc(sizeof(IID) * 4);
     if (!a) { *n = 0; *ids = NULL; return E_OUTOFMEMORY; }
@@ -349,9 +350,12 @@ static HRESULT WINAPI dv_ble_h_iids(void* self, ULONG* n, IID** ids) {
     *ids = a;
     return S_OK;
 }
-static HRESULT WINAPI dv_ble_h_trust(void* self, TrustLevel* t) { (void)self; if (t) *t = 0; return S_OK; }
+static HRESULT WINAPI dv_ble_h_trust(void* self, TrustLevel* t) {
+    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetTrustLevel asked"); }
+    (void)self; if (t) *t = 0; return S_OK; }
 static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
     (void)self;
+    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetRuntimeClassName asked"); }
     if (!out) return E_POINTER;
     static const wchar_t n[] = L"Windows.Foundation.TypedEventHandler`2";
     return WindowsCreateString(n, (UINT32)(sizeof n / 2 - 1), out);
