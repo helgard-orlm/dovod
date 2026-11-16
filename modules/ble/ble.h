@@ -176,19 +176,53 @@ static void* dv_ble_w;                  // the watcher
 static int64_t dv_ble_tok_recv, dv_ble_tok_stop;
 static bool dv_ble_watching, dv_ble_stopping;
 static volatile LONG dv_ble_busy;       // callbacks in flight (the stop handshake waits for 0)
-static volatile LONG dv_ble_dbg = 5;    // the first N shouts leave a stderr trace (crash hunting)
+static volatile LONG dv_ble_dbg = 5;    // the first N shouts leave a trace (crash hunting)
+static HANDLE dv_ble_lf = INVALID_HANDLE_VALUE;   // blescan.log next to the exe, opened once
 
 // the start steps and the first events leave a trail; a hard crash says where it happened
 static void dv_ble_say(const char* what) {
+    char b[280];
+    int n = snprintf(b, sizeof b, "[%lu] %s\n", (unsigned long)GetCurrentThreadId(), what);
+    if (dv_ble_lf != INVALID_HANDLE_VALUE && n > 0) {
+        DWORD w = 0;
+        WriteFile(dv_ble_lf, b, (DWORD)n, &w, NULL);   // no CRT allocation: safe from any thread
+    }
     EnterCriticalSection(&dv_ble_cs);
     fprintf(stderr, "ble: %s\n", what);
     fflush(stderr);
     LeaveCriticalSection(&dv_ble_cs);
 }
 static LONG WINAPI dv_ble_crash(EXCEPTION_POINTERS* ep) {   // no cs here: the crash may hold it
-    fprintf(stderr, "ble: CRASH code=%08lx addr=%p\n",
-            ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0,
-            ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL);
+    DWORD code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
+    char* addr = (char*)(ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL);
+    ULONG_PTR kind = ep && ep->ExceptionRecord && ep->ExceptionRecord->NumberParameters >= 1
+                     ? ep->ExceptionRecord->ExceptionInformation[0] : 9;
+    char* target = ep && ep->ExceptionRecord && ep->ExceptionRecord->NumberParameters >= 2
+                   ? (char*)ep->ExceptionRecord->ExceptionInformation[1] : NULL;
+    const char* rw = kind == 0 ? "read" : (kind == 1 ? "write" : (kind == 8 ? "EXEC" : "?"));
+    char where[400] = "";
+    const char* base = "unknown";
+    HMODULE m = NULL;
+    if (addr && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    addr, &m) && m) {
+        char path[MAX_PATH * 2];
+        DWORD n = GetModuleFileNameA(m, path, sizeof path);
+        if (n && n < sizeof path) {
+            const char* c = path + n;
+            while (c > path && c[-1] != '\\' && c[-1] != '/') { c--; }
+            base = c;
+        }
+        snprintf(where, sizeof where, " in %s+0x%llx", base, (unsigned long long)(addr - (char*)m));
+    }
+    char b[512];
+    int len = snprintf(b, sizeof b,
+        "CRASH code=%08lx thread=%lu %s addr=%p target=%p%s\n",
+        (unsigned long)code, (unsigned long)GetCurrentThreadId(), rw, addr, target, where);
+    if (dv_ble_lf != INVALID_HANDLE_VALUE && len > 0) {
+        DWORD w = 0;
+        WriteFile(dv_ble_lf, b, (DWORD)len, &w, NULL);
+    }
+    fprintf(stderr, "ble: %s", b);
     fflush(stderr);
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -198,6 +232,18 @@ static void dv_ble_ensure(void) {
         InitializeCriticalSection(&dv_ble_cs);
         InitializeConditionVariable(&dv_ble_cv);
         SetUnhandledExceptionFilter(dv_ble_crash);
+        char path[MAX_PATH * 2];
+        DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
+        const char* tail = "blescan.log";
+        if (n && n < sizeof path) {
+            char* c = path + n;
+            while (c > path && c[-1] != '\\' && c[-1] != '/') { c--; }
+            snprintf(c, (size_t)(path + sizeof path - c), "%s", tail);
+        } else {
+            snprintf(path, sizeof path, "%s", tail);
+        }
+        dv_ble_lf = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         dv_ble_made = 1;
     }
 }
@@ -282,7 +328,15 @@ static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
 static HRESULT WINAPI dv_ble_qi_recv(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
     if (IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
-        IsEqualIID(riid, &dv_ble_iid_teh_recv) || IsEqualIID(riid, &dv_ble_iid_agile)) { *out = self; return S_OK; }
+        IsEqualIID(riid, &dv_ble_iid_teh_recv) || IsEqualIID(riid, &dv_ble_iid_agile)) {
+        if (riid && IsEqualIID(riid, &dv_ble_iid_teh_recv) && dv_ble_dbg > 0) {
+            char w[80];
+            snprintf(w, sizeof w, "delivery: source QI recv handler riid=%08lx", (unsigned long)riid->Data1);
+            dv_ble_say(w);
+        }
+        *out = self;
+        return S_OK;
+    }
     return E_NOINTERFACE;
 }
 
@@ -479,6 +533,7 @@ static bool dv_ble_scan_start(bool active) {
     dv_ble_watcherVtbl* wv = *(dv_ble_watcherVtbl**)w;
     int64_t tr = 0, ts = 0;
     dv_ble_say("watcher made");
+    if (FAILED(hr) || !w) { dv_ble_say("QI to the watcher failed"); }
     dv_ble_stopping = 0;
     HRESULT hr1 = wv->put_ScanningMode(w, active ? 1 : 0);
     HRESULT hr2 = wv->add_Received(w, &dv_ble_recv_obj, &tr);
@@ -503,7 +558,6 @@ static bool dv_ble_scan_start(bool active) {
         wv->Release(w);
         return false;
     }
-    dv_ble_say("start called");
     int32_t st = 0;
     for (int i = 0; i < 60; i++) {                     // up to ~3 s for a slow radio (breaks on success)
         wv->get_Status(w, &st);
@@ -523,7 +577,9 @@ static bool dv_ble_scan_start(bool active) {
         wv->Release(w);
         return false;
     }
-    dv_ble_say("STARTED");
+    if (st == 4) { dv_ble_say("start aborted (status 4): radio off/blocked"); }
+    else if (st != 1) { dv_ble_say("start timed out: status not Started in 3 s"); }
+    else { dv_ble_say("STARTED"); }
     dv_ble_w = w;
     dv_ble_watching = true;
     // drop a stale "off" of the dead session: it would be advice about a radio that is back
