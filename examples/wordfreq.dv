@@ -1,0 +1,121 @@
+// Word frequency: reads a file, prints the most common words.
+// All logic is pure and exampled; only `main` touches the outside world.
+
+record Count { word: Text, n: Int }
+
+fn is_letter(b: Int) -> Bool
+  ex is_letter(97) == true
+  ex is_letter(32) == false
+  ex is_letter(208) == true
+{
+  // ASCII letters, or any byte of a multi-byte UTF-8 character
+  return (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or b >= 128
+}
+
+fn lower_ascii(t: Text) -> Text
+  ex lower_ascii("HeLLo") == "hello"
+  ex lower_ascii("") == ""
+{
+  var out_text = ""
+  for i in 0..len(t) {
+    let b = byte(t, i)
+    if b >= 65 and b <= 90 {
+      out_text = out_text + from_byte(b + 32)
+    } else {
+      out_text = out_text + from_byte(b)
+    }
+  }
+  return out_text
+}
+
+fn words(t: Text) -> List[Text]
+  ex words("Hi, hi there!") == ["hi", "hi", "there"]
+  ex words("") == []
+  ex words("...") == []
+  ex words("end") == ["end"]
+{
+  var result: List[Text] = []
+  var start = -1
+  for i in 0..len(t) {
+    if is_letter(byte(t, i)) {
+      if start < 0 {
+        start = i
+      }
+    } else if start >= 0 {
+      result.push(lower_ascii(slice(t, start, i)))
+      start = -1
+    }
+  }
+  if start >= 0 {
+    result.push(lower_ascii(slice(t, start, len(t))))
+  }
+  return result
+}
+
+fn count_words(ws: List[Text]) -> List[Count]
+  ex count_words(["a", "b", "a"]) == [Count(word: "a", n: 2), Count(word: "b", n: 1)]
+  ex count_words([]) == []
+{
+  var counts: List[Count] = []
+  for w in ws {
+    var found = false
+    for i in 0..len(counts) {
+      if counts[i].word == w {
+        counts[i].n = counts[i].n + 1
+        found = true
+        break
+      }
+    }
+    if not found {
+      counts.push(Count(word: w, n: 1))
+    }
+  }
+  return counts
+}
+
+fn sort_desc(cs: List[Count]) -> List[Count]
+  give len(out) == len(cs)
+  ex sort_desc([Count(word: "x", n: 1), Count(word: "y", n: 3), Count(word: "z", n: 2)]) == [Count(word: "y", n: 3), Count(word: "z", n: 2), Count(word: "x", n: 1)]
+  ex sort_desc([]) == []
+{
+  var a = cs
+  for i in 1..len(a) {
+    var j = i
+    while j > 0 and a[j - 1].n < a[j].n {
+      let tmp = a[j]
+      a[j] = a[j - 1]
+      a[j - 1] = tmp
+      j = j - 1
+    }
+  }
+  return a
+}
+
+fn report(text: Text, top: Int) -> List[Text]
+  need top >= 0
+  ex report("b a b", 5) == ["b: 2", "a: 1"]
+  ex report("b a b", 1) == ["b: 2"]
+{
+  let sorted = sort_desc(count_words(words(text)))
+  var lines: List[Text] = []
+  for c in slice(sorted, 0, min(top, len(sorted))) {
+    lines.push(c.word + ": " + show(c.n))
+  }
+  return lines
+}
+
+fn main() uses io, env, fs_read {
+  let a = args()
+  if len(a) != 1 {
+    print("usage: wordfreq FILE")
+    return
+  }
+  match read_file(a[0]) {
+    some(text) => {
+      for line in report(text, 10) {
+        print(line)
+      }
+    }
+    none => { print("cannot read " + a[0]) }
+  }
+}

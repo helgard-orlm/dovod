@@ -1,0 +1,140 @@
+// Ownership stress: every tricky path of the code generator. Run under ASan.
+record Item { name: Text, tags: List[Text] }
+enum Tree { Leaf(v: Int), Node(kids: List[Tree]), Named(label: Text, inner: List[Tree]) }
+
+fn tree_sum(t: Tree) -> Int
+  ex tree_sum(Leaf(v: 3)) == 3
+  ex tree_sum(Node(kids: [Leaf(v: 1), Node(kids: [Leaf(v: 2), Leaf(v: 3)])])) == 6
+  ex tree_sum(Named(label: "x", inner: [Leaf(v: 5)])) == 5
+{
+  match t {
+    Leaf(v) => { return v }
+    Node(kids) => {
+      var s = 0
+      for k in kids { s = s + tree_sum(k) }
+      return s
+    }
+    Named(inner) => {
+      var s2 = 0
+      for k2 in inner { s2 = s2 + tree_sum(k2) }
+      return s2
+    }
+  }
+}
+
+fn dup_all(xs: List[Text]) -> List[Text]
+  ex dup_all(["a", "b"]) == ["a", "b", "a", "b"]
+  ex dup_all([]) == []
+{
+  var ys = xs
+  for x in ys {
+    ys.push(x)          // mutating what we iterate: loop must see a snapshot
+  }
+  return ys
+}
+
+fn lazy(xs: List[Text], i: Int) -> Bool
+  ex lazy(["ab", "cd"], 1) == true
+  ex lazy(["ab", "cd"], 7) == false
+  ex lazy(["ab", "cd"], 0) == false
+{
+  // right side builds heap temps and would trap if evaluated eagerly
+  return i < len(xs) and xs[i] + "!" == "cd!" or i < 0 and xs[i] + "?" == "zz?"
+}
+
+fn first_long(xs: List[Text], n: Int) -> Opt[Text]
+  ex first_long(["a", "bbb", "cccc"], 2) == some("bbb")
+  ex first_long(["a"], 2) == none
+  ex first_long([], 0) == none
+{
+  for x in xs {
+    let padded = x + ""
+    if len(padded) < n {
+      continue
+    }
+    if len(padded) > 100 {
+      break
+    }
+    return some(padded)
+  }
+  return none
+}
+
+fn retag(it: Item) -> Item
+  ex retag(Item(name: "n", tags: ["a", "b"])) == Item(name: "n!", tags: ["b", "a", "n"])
+  ex retag(Item(name: "", tags: [])) == Item(name: "!", tags: [""])
+{
+  var r = it
+  r.name = r.name + "!"
+  if len(r.tags) >= 2 {
+    let t0 = r.tags[0]
+    r.tags[0] = r.tags[1]
+    r.tags[1] = t0
+  }
+  r.tags.push(it.name)
+  return r
+}
+
+fn grid(n: Int) -> List[List[Int]]
+  need n >= 0
+  ex grid(2) == [[0, 1], [1, 2]]
+  ex grid(0) == []
+{
+  var g: List[List[Int]] = []
+  for i in 0..n {
+    var row: List[Int] = []
+    for j in 0..n { row.push(i + j) }
+    g.push(row)
+  }
+  if n > 0 {
+    g[0][0] = g[0][0] * 1
+  }
+  return g
+}
+
+fn drain(xs: List[Text]) -> Int
+  ex drain(["a", "b", "c"]) == 3
+  ex drain([]) == 0
+{
+  var ys = xs
+  var n = 0
+  while len(ys) > 0 and len(or_else(some(ys[len(ys) - 1]), "zz")) > 0 {
+    ys.pop()
+    n = n + 1
+  }
+  return n
+}
+
+fn opt_chain(t: Text) -> Text
+  ex opt_chain("k=v") == "v"
+  ex opt_chain("kv") == "?"
+  ex opt_chain("a=b=c") == "b=c"
+{
+  var cur = some(t)
+  match cur {
+    some(s) => {
+      match find(s, "=") {
+        some(i) => { cur = some(slice(s, i + 1, len(s))) }   // mutating the matched var
+        none => { cur = none }
+      }
+    }
+    none => { trap("unreachable") }
+  }
+  return or_else(cur, "?")
+}
+
+fn joined(parts: List[Text]) -> Text
+  ex joined(["a", "b"]) == "a-b|A-B|2"
+  ex joined([]) == "||0"
+{
+  return join(parts, "-") + "|" + replace(join(split(join(parts, "-"), "a"), "A"), "b", "B") + "|" + show(len(parts))
+}
+
+fn main() uses io, clock {
+  let t0 = now_ms()
+  print(show(tree_sum(Node(kids: [Leaf(v: 1), Leaf(v: 2)]))))
+  print(show(dup_all(["x"])) + show(retag(Item(name: "q", tags: ["1", "2"]))))
+  print(show(grid(3)) + show(first_long(["aa"], 1)) + show(lazy(["ab", "cd"], 1)))
+  print(opt_chain("x=y") + joined(["a", "b"]) + show(drain(["z"])))
+  if now_ms() - t0 < 0 { print("time went backwards") }
+}

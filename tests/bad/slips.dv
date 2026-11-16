@@ -1,0 +1,36 @@
+record User { name: Text, age: Int }
+enum Color { Red, Green, Blue }
+
+fn pick(c: Color) -> Int
+  ex pick(Red) == 1
+{
+  match c {
+    Red => { return 1 }
+    Green => { return 2 }
+  }
+}
+
+fn avg(xs: List[Int]) -> Float
+  ex true
+{
+  var total = 0
+  for x in xs {
+    totl = total + x
+  }
+  return total / len(xs)
+}
+
+fn loud(u: User) -> Text {
+  print(u.nmae)
+  let age = u.age
+  let age = 5
+  return "x" + u.age
+}
+
+fn first(xs: List[Text]) -> Text
+  ex first(["a"]) == "a"
+{
+  let r: Text = find(xs[0], "a")
+  write_file("log.txt", r)
+  return ?todo
+}

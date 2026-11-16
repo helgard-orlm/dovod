@@ -1,0 +1,67 @@
+// Benchmark: sieve of primes + integer loop + text building. Compare with bench.py.
+
+fn count_primes(n: Int) -> Int
+  need n >= 2
+  ex count_primes(10) == 4
+  ex count_primes(100) == 25
+{
+  var sieve: List[Bool] = []
+  for _i in 0..n + 1 { sieve.push(true) }
+  var count = 0
+  for i in 2..n + 1 {
+    if sieve[i] {
+      count = count + 1
+      var j = i * i
+      while j <= n {
+        sieve[j] = false
+        j = j + i
+      }
+    }
+  }
+  return count
+}
+
+fn collatz_longest(limit: Int) -> Int
+  need limit >= 1
+  ex collatz_longest(10) == 9
+  ex collatz_longest(1) == 1
+{
+  var best = 1
+  var best_len = 1
+  for start in 1..limit + 1 {
+    var x = start
+    var steps = 1
+    while x != 1 {
+      if x % 2 == 0 { x = x / 2 } else { x = 3 * x + 1 }
+      steps = steps + 1
+    }
+    if steps > best_len {
+      best_len = steps
+      best = start
+    }
+  }
+  return best
+}
+
+fn digits_total(n: Int) -> Int
+  need n >= 0
+  ex digits_total(12) == 14
+  ex digits_total(0) == 0
+{
+  var total = 0
+  for i in 0..n {
+    total = total + len(show(i))
+  }
+  return total
+}
+
+fn main() uses io, clock {
+  let t0 = now_ms()
+  print("primes below 5e6: " + show(count_primes(5000000)))
+  let t1 = now_ms()
+  print("longest collatz below 1e6: " + show(collatz_longest(1000000)))
+  let t2 = now_ms()
+  print("digits: " + show(digits_total(2000000)))
+  let t3 = now_ms()
+  print("ms: sieve " + show(t1 - t0) + ", collatz " + show(t2 - t1) + ", text " + show(t3 - t2))
+}

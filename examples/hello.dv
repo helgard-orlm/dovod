@@ -1,0 +1,20 @@
+// The smallest useful Dovod program: pure logic with evidence, thin effectful shell.
+
+fn greet(name: Text) -> Text
+  ex greet("world") == "Hello, world!"
+  ex greet("") == "Hello, stranger!"
+{
+  if len(name) == 0 {
+    return "Hello, stranger!"
+  }
+  return "Hello, " + name + "!"
+}
+
+fn main() uses io, env {
+  let a = args()
+  if len(a) > 0 {
+    print(greet(a[0]))
+  } else {
+    print(greet(""))
+  }
+}

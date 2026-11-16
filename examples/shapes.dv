@@ -1,0 +1,78 @@
+// Records, enums, match, contracts, lists.
+const pi: Float = 3.141592653589793
+
+record Point { x: Float, y: Float }
+
+enum Shape {
+  Circle(center: Point, r: Float)
+  Rect(corner: Point, w: Float, h: Float)
+  Dot
+}
+
+fn area(s: Shape) -> Float
+  give out >= 0.0
+  ex near(area(Circle(center: Point(x: 0.0, y: 0.0), r: 1.0)), 3.14159, 0.001)
+  ex area(Rect(corner: Point(x: 1.0, y: 1.0), w: 2.0, h: 3.0)) == 6.0
+  ex area(Dot) == 0.0
+{
+  match s {
+    Circle(r) => { return pi * r * r }
+    Rect(w, h) => { return w * h }
+    Dot => { return 0.0 }
+  }
+}
+
+fn total_area(shapes: List[Shape]) -> Float
+  ex total_area([]) == 0.0
+  ex total_area([Dot, Rect(corner: Point(x: 0.0, y: 0.0), w: 2.0, h: 2.0)]) == 4.0
+{
+  var sum = 0.0
+  for s in shapes {
+    sum = sum + area(s)
+  }
+  return sum
+}
+
+fn clamp(x: Int, lo: Int, hi: Int) -> Int
+  need lo <= hi
+  give out >= lo and out <= hi
+  ex clamp(5, 0, 3) == 3
+  ex clamp(-1, 0, 3) == 0
+  ex clamp(2, 0, 3) == 2
+{
+  if x < lo {
+    return lo
+  } else if x > hi {
+    return hi
+  }
+  return x
+}
+
+fn largest(shapes: List[Shape]) -> Opt[Shape]
+  ex largest([]) == none
+  ex largest([Dot, Rect(corner: Point(x: 0.0, y: 0.0), w: 1.0, h: 1.0)]) == some(Rect(corner: Point(x: 0.0, y: 0.0), w: 1.0, h: 1.0))
+{
+  var best: Opt[Shape] = none
+  var best_area = -1.0
+  for s in shapes {
+    if area(s) > best_area {
+      best_area = area(s)
+      best = some(s)
+    }
+  }
+  return best
+}
+
+fn main() uses io {
+  let shapes = [
+    Circle(center: Point(x: 0.0, y: 0.0), r: 2.0),
+    Rect(corner: Point(x: 1.0, y: 1.0), w: 3.0, h: 4.0),
+    Dot
+  ]
+  print("total area: " + show(total_area(shapes)))
+  print("clamp(15, 0, 10) = " + show(clamp(15, 0, 10)))
+  match largest(shapes) {
+    some(s) => { print("largest: " + show(s)) }
+    none => { print("no shapes") }
+  }
+}
