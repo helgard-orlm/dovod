@@ -1,0 +1,41 @@
+record P { n: Int, t: Text }
+enum E { A, B }
+fn f(p: P) -> P
+  ex f(P(n: 1, t: "")).n == 2
+{
+  return p with { m: 2 }
+}
+fn g(p: P) -> P
+  ex g(P(n: 1, t: "")).n == 2
+{
+  return p with { n: "two" }
+}
+fn h(k: Text) -> Int
+  ex h("a") == 1
+{
+  match k {
+    "a" => { return 1 }
+  }
+}
+fn i(e: E) -> Int
+  ex i(A) == 1
+{
+  match e {
+    A => { return 1 }
+    else => { return 2 }
+  }
+}
+fn sub(lo: Int, hi: Int) -> Int
+  ex sub(hi: 1, lo: 3) == 2
+{
+  return hi - lo
+}
+fn j(n: Int) -> Int
+  ex j(1) == 1
+{
+  match n {
+    1 => { return 1 }
+    1 => { return 2 }
+    else => { return 0 }
+  }
+}

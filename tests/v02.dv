@@ -1,0 +1,88 @@
+// Dovod 0.2 features: `with`, match on Int/Text/Bool, labelled arguments, character literals.
+record P { name: Text, tags: List[Text], n: Int, inner: Q }
+record Q { a: Int, t: Text }
+
+fn base() -> P
+  ex base().n == 1
+  ex base().name == "p"
+{
+  return P(name: "p", tags: ["x"], n: 1, inner: Q(a: 7, t: "q"))
+}
+
+fn bump(p: P) -> P
+  ex bump(base()).n == 2
+  ex bump(base()).name == "p!"
+  ex bump(base()).tags == ["x"]
+  ex bump(bump(base())) == P(name: "p!!", tags: ["x"], n: 3, inner: Q(a: 7, t: "q"))
+{
+  return p with { n: p.n + 1, name: p.name + "!" }
+}
+
+fn retag(p: P, t: Text) -> P
+  ex retag(base(), "y").tags == ["x", "y"]
+  ex retag(base(), "y").inner == Q(a: 8, t: "qy")
+{
+  return p with {
+    tags: p.tags + [t]
+    inner: p.inner with { a: p.inner.a + 1, t: p.inner.t + t }
+  }
+}
+
+fn kind(key: Text) -> Int
+  ex kind("SPACE") == 1
+  ex kind("N") == 2
+  ex kind("PGDN") == 2
+  ex kind("zzz") == 0
+{
+  match key {
+    "SPACE" => { return 1 }
+    "N", "PGDN" => { return 2 }
+    else => { return 0 }
+  }
+}
+
+fn sign_name(n: Int) -> Text
+  ex sign_name(-1) == "minus one"
+  ex sign_name(0) == "zero"
+  ex sign_name(5) == "other"
+{
+  var r = "other"
+  match n {
+    -1 => { r = "minus one" }
+    0 => { r = "zero" }
+    else => { }
+  }
+  return r
+}
+
+fn yes_no(b: Bool) -> Text
+  ex yes_no(true) == "yes"
+  ex yes_no(false) == "no"
+{
+  match b {
+    true => { return "yes" }
+    false => { return "no" }
+  }
+}
+
+fn is_digit(b: Int) -> Bool
+  ex is_digit('0') == true
+  ex is_digit('9') == true
+  ex is_digit('/') == false
+  ex is_digit(':') == false
+  ex is_digit('\n') == false
+{
+  return b >= '0' and b <= '9'
+}
+
+fn span(lo: Int, hi: Int) -> Int
+  need lo <= hi
+  ex span(lo: 2, hi: 5) == 3
+  ex span(2, hi: 2) == 0
+{
+  return hi - lo
+}
+
+fn main() uses io {
+  print(show(retag(bump(base()), "z")) + " " + show(kind("N")) + sign_name(0) + yes_no(span(lo: 1, hi: 2) == 1) + show(is_digit('5')))
+}

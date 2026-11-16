@@ -72,6 +72,8 @@ class CGen:
         self.exs = []            # (fn name, expr node)
         self.buf, self.declbuf, self.scopes = [], [], []
         self.fn = None
+        self.mut_on = False      # generating the body of a function whose examples can judge mutants
+        self.bmuts = []          # body mutants: {'fn', 'line', 'col', 'what'}; id = index + 1
         for t in ALWAYS:
             self.reg(t)
         for fs in ck.records.values():
@@ -315,6 +317,16 @@ class CGen:
                 if x != skip:
                     self.emit(self.free(t, x))
 
+    def newmut(self, node, what):
+        self.bmuts.append({'fn': self.fn.name, 'file': node.file, 'line': node.line, 'col': node.col, 'what': what})
+        return len(self.bmuts)
+
+    def alt(self, node, what, normal, mutant):
+        """`normal`, or — when this body mutant is switched on — `mutant`."""
+        if not self.mut_on:
+            return normal
+        return f"(dv_bm == {self.newmut(node, what)} ? {mutant} : {normal})"
+
     # -- expressions
     def val(self, e, sink=False):
         c, owned = self.g(e)
@@ -332,11 +344,17 @@ class CGen:
     def g(self, e):
         k, t = e.k, e.ty
         if k == 'Int':
-            return f"INT64_C({e.v})", False
+            if e.v < 0:
+                return f"(-INT64_C({-e.v}))", False
+            c = f"INT64_C({e.v})"
+            if e.v < 2 ** 62:
+                c = self.alt(e, f"`{e.v}` becomes `{e.v + 1}`", c, f"INT64_C({e.v + 1})")
+            return c, False
         if k == 'Float':
-            return repr(e.v), False
+            return self.alt(e, f"`{e.v!r}` becomes `{e.v + 1.0!r}`", repr(e.v), repr(e.v + 1.0)), False
         if k == 'Bool':
-            return ('true' if e.v else 'false'), False
+            a, b = ('true', 'false') if e.v else ('false', 'true')
+            return self.alt(e, f"`{a}` becomes `{b}`", a, b), False
         if k == 'Str':
             return f"DV_LIT({cstr(e.v)}, {len(e.v.encode('utf-8'))})", False
         if k == 'Name':
@@ -359,10 +377,18 @@ class CGen:
             if not e.fields:
                 return f"(({self.cty(t)}){{.tag = {e.variant}}})", True
             return f"(({self.cty(t)}){{.tag = {e.variant}, .u.V_{e.name} = {{{fs}}}}})", True
+        if k == 'With':
+            x = self.plain(t, self.val(e.e, sink=True))
+            fts = dict(self.ck.records[t])
+            vals = [(n, self.plain(fts[n], self.val(fe, sink=True))) for n, fe in e.fields]
+            for n, v in vals:
+                self.emit(self.free(fts[n], f"{x}.f_{n}"))
+                self.emit(f"{x}.f_{n} = {v};")
+            return x, True
         if k == 'Un':
             c = self.val(e.e)
             if e.op == 'not':
-                return f"(!{c})", False
+                return self.alt(e, "`not` is dropped", f"(!{c})", f"({c})"), False
             return (f"dv_neg({c}, {self.loc(e)})" if t == 'Int' else f"(-({c}))"), False
         if k == 'Bin':
             return self.g_bin(e)
@@ -383,7 +409,9 @@ class CGen:
             r = self.val(e.r)
             rb, self.buf = self.buf, saved
             if not rb:
-                return f"({l} {'&&' if op == 'and' else '||'} {r})", False
+                a, b = ('&&', '||') if op == 'and' else ('||', '&&')
+                other = 'or' if op == 'and' else 'and'
+                return self.alt(e, f"`{op}` becomes `{other}`", f"({l} {a} {r})", f"({l} {b} {r})"), False
             x = self.plain('Bool', l)
             self.emit(f"if ({'' if op == 'and' else '!'}{x}) {{")
             self.buf.extend(rb)
@@ -393,18 +421,30 @@ class CGen:
         a, b, L = self.val(e.l), self.val(e.r), self.loc(e)
         if op in ('==', '!='):
             c = self.eq(lt, a, b)
-            return (c if op == '==' else f"(!{c})"), False
+            n = f"(!{c})"
+            if op == '==':
+                return self.alt(e, "`==` becomes `!=`", c, n), False
+            return self.alt(e, "`!=` becomes `==`", n, c), False
         if op in ('<', '<=', '>', '>='):
+            o2 = {'<': '<=', '<=': '<', '>': '>=', '>=': '>'}[op]
             if lt == 'Text':
-                return f"(dv_text_cmp({a}, {b}) {op} 0)", False
-            return f"({a} {op} {b})", False
+                return self.alt(e, f"`{op}` becomes `{o2}`", f"(dv_text_cmp({a}, {b}) {op} 0)",
+                                f"(dv_text_cmp({a}, {b}) {o2} 0)"), False
+            return self.alt(e, f"`{op}` becomes `{o2}`", f"({a} {op} {b})", f"({a} {o2} {b})"), False
+        fl = {'+': '-', '-': '+'}.get(op)
         if lt == 'Int':
-            f = {'+': 'dv_add', '-': 'dv_sub', '*': 'dv_mul', '/': 'dv_div', '%': 'dv_mod'}[op]
-            return f"{f}({a}, {b}, {L})", False
+            fs = {'+': 'dv_add', '-': 'dv_sub', '*': 'dv_mul', '/': 'dv_div', '%': 'dv_mod'}
+            c = f"{fs[op]}({a}, {b}, {L})"
+            if fl:
+                c = self.alt(e, f"`{op}` becomes `{fl}`", c, f"{fs[fl]}({a}, {b}, {L})")
+            return c, False
         if lt == 'Float':
             if op == '/':
                 return f"dv_fdiv({a}, {b}, {L})", False
-            return f"({a} {op} {b})", False
+            c = f"({a} {op} {b})"
+            if fl:
+                c = self.alt(e, f"`{op}` becomes `{fl}`", c, f"({a} {fl} {b})")
+            return c, False
         if lt == 'Text':
             return f"dv_text_concat({a}, {b})", True
         return f"{self.cty(lt)}_concat({a}, {b})", True
@@ -489,6 +529,8 @@ class CGen:
             if self.heap(s.ty):
                 self.scopes[-1].owned.append((x, s.ty))
         elif k == 'Assign':
+            if self.mut_on:   # mutant: this assignment does not happen
+                self.emit(f"if (dv_bm != {self.newmut(s, 'this assignment is removed')}) {{")
             t = s.target.ty
             nv = self.plain(t, self.val(s.e, sink=True))
             lv = self.lv(s.target)
@@ -500,14 +542,20 @@ class CGen:
                 self.emit(f"{self.cty(t)}* {p} = &{lv};")
                 self.emit(self.free(t, '*' + p))
                 self.emit(f"*{p} = {nv};")
+            if self.mut_on:
+                self.emit("}")
         elif k == 'MethodStmt':
             c = s.call
             X = self.cty(c.e.ty)
+            if self.mut_on:
+                self.emit(f"if (dv_bm != {self.newmut(s, f'this `.{c.name}` is removed')}) {{")
             if c.name == 'push':
                 v = self.plain(c.e.ty[1], self.val(c.args[0], sink=True))
                 self.emit(f"{X}_push(&{self.lv(c.e)}, {v});")
             else:
                 self.emit(f"{X}_pop(&{self.lv(c.e)}, {self.loc(c)});")
+            if self.mut_on:
+                self.emit("}")
         elif k == 'If':
             self.emit(f"if ({self.val(s.cond)})")
             self.block(s.then, cov=self.newcov(s.line, 'if', s.then))
@@ -527,7 +575,7 @@ class CGen:
             self.emit(f"if (!({c})) {{")
             self.frees(self.scopes[-1:])
             self.emit("break; }")
-            self.emit(f"DV_COV({self.newcov(s.line, 'while', s.body)});")
+            self.emit(f"DV_COV({self.newcov(s.line, 'while', s.body)}); DV_STEP;")
             for st in s.body:
                 self.stmt(st)
             self.frees(self.scopes[-1:])
@@ -538,7 +586,7 @@ class CGen:
             b = self.plain('Int', self.val(s.b))
             v = 'v_' + s.name
             self.emit(f"for (int64_t {v} = {a}; {v} < {b}; {v}++)")
-            self.block(s.body, 'loop', cov=self.newcov(s.line, 'for', s.body))
+            self.block(s.body, 'loop', head=["DV_STEP;"], cov=self.newcov(s.line, 'for', s.body))
         elif k == 'ForIn':
             t = s.e.ty
             c = self.val(s.e, sink=s.snapshot)
@@ -546,7 +594,7 @@ class CGen:
             self.emit(f"{it} = {c};")
             i = self.name('i')
             self.emit(f"for (int64_t {i} = 0; {i} < {it}.n; {i}++)")
-            self.block(s.body, 'loop', head=[f"{self.cty(s.elem)} v_{s.name} = {it}.p[{i}];"],
+            self.block(s.body, 'loop', head=[f"{self.cty(s.elem)} v_{s.name} = {it}.p[{i}]; DV_STEP;"],
                        cov=self.newcov(s.line, 'for', s.body))
         elif k == 'Match':
             t = s.mty
@@ -559,6 +607,10 @@ class CGen:
                 if pat.k == 'PSome':
                     cond = f"{m}.has"
                     head = [f"{self.cty(t[1])} v_{pat.name} = {m}.v;"]
+                elif pat.k == 'PElse':
+                    cond = "1"
+                elif pat.k == 'PLit':
+                    cond = ' || '.join(self.eq(t, m, self.g(lit)[0]) for lit in pat.lits)
                 elif pat.k == 'PNone':
                     cond = f"!{m}.has"
                 else:
@@ -609,7 +661,10 @@ class CGen:
         self.start()
         self.emit(f"static {ret} {impl}({params})")
         tail = None if f.ret == 'Void' else f'dv_trap("reached the end of {f.name} without return", {self.loc(n)});'
-        self.block(n.body, 'fn', cov=self.newcov(n.line, 'fn body', n.body), tail=tail)
+        self.mut_on = self.mode == 'test' and not f.uses and f.name != 'main' and bool(n.exs)
+        head = [f"DV_ENTER({self.fn_id[f.name]});"] if self.mode == 'test' else []
+        self.block(n.body, 'fn', head=head, cov=self.newcov(n.line, 'fn body', n.body), tail=tail)
+        self.mut_on = False
         bodies.extend(self.buf)
         if not contract:
             return
@@ -693,15 +748,39 @@ class CGen:
                         self.exs.append((f.name, e))
             for i, (_, e) in enumerate(self.exs):
                 self.gen_ex(i, e, bodies)
+            E, F, M = len(self.exs), len(ck.fns), len(self.bmuts)
+            main.append(f"static bool (*dv_ex_tab[{E + 1}])(void) = {{" + ', '.join(f"EX_{i}" for i in range(E)) + (", " if E else "") + "0};")
+            main.append(f"static const int dv_ex_fn[{E + 1}] = {{" + ', '.join(str(self.fn_id[fn]) for fn, _ in self.exs) + (", " if E else "") + "0};")
+            main.append(f"static const int dv_bm_fn[{M + 2}] = {{0, " + ', '.join(str(self.fn_id[m['fn']]) for m in self.bmuts) + (", " if M else "") + "0};")
+            main.append(f"static unsigned char dv_touch[{E + 1}][{F + 1}], dv_exok[{E + 1}]; static long long dv_exsteps[{E + 1}];")
+            main.append("static bool dv_try(int i) { volatile bool passed = false; if (setjmp(dv_jmp) == 0) passed = dv_ex_tab[i](); return passed; }")
             main.append("int main(void) { dv_test_mode = 1;")
-            for i, (fname, _) in enumerate(self.exs):
-                k = self.fn_id[fname]
-                main.append(f'memset(dv_ran, 0, sizeof dv_ran); if (setjmp(dv_jmp) == 0) {{ if (EX_{i}()) {{ printf("EX\\t{i}\\tok\\n"); '
-                            f'if (!dv_ran[{k}]) printf("NORUN\\t{i}\\n"); dv_mutate({i}, {k}, EX_{i}); }} }} '
-                            f'else printf("EX\\t{i}\\ttrap\\t%s\\n", dv_trap_msg); fflush(stdout);')
+            main.append(f"for (int i = 0; i < {E}; i++) {{ int k = dv_ex_fn[i];")
+            main.append('  memset(dv_ran, 0, sizeof dv_ran); memset(dv_seen, 0, sizeof dv_seen); dv_steps = 0;')
+            main.append('  if (setjmp(dv_jmp) == 0) { if (dv_ex_tab[i]()) { printf("EX\\t%d\\tok\\n", i); '
+                        'memcpy(dv_touch[i], dv_seen, sizeof dv_seen); dv_exsteps[i] = dv_steps; dv_exok[i] = 1; '
+                        'if (!dv_ran[k]) printf("NORUN\\t%d\\n", i); dv_mutate(i, k, dv_ex_tab[i]); } } '
+                        'else printf("EX\\t%d\\ttrap\\t%s\\n", i, dv_trap_msg); fflush(stdout); }')
             main.append(f'for (int i = 0; i < {len(self.cov)}; i++) printf("COV\\t%d\\t%lld\\n", i, dv_cov[i]);')
+            # body mutants: switch on one small change at a time; an example "notices" it if it stops passing
+            main.append("fflush(stdout); dv_quiet = 1; clock_t t0 = clock();")
+            main.append(f"for (int m = 1; m <= {M}; m++) {{")
+            main.append('  if ((double)(clock() - t0) / CLOCKS_PER_SEC > 20.0) { printf("BMSTOP\\t%d\\n", m); break; }')
+            main.append("  int killed = 0, tried = 0;")
+            main.append(f"  for (int i = 0; i < {E} && !killed; i++) {{")
+            main.append("    if (!dv_exok[i] || !dv_touch[i][dv_bm_fn[m]]) continue;")
+            main.append("    tried++; dv_bm = m; dv_fuel = dv_exsteps[i] * 10 + 100000; memset(dv_depth, 0, sizeof dv_depth);")
+            main.append("    if (!dv_try(i)) killed = 1;")
+            main.append("    dv_bm = 0;")
+            main.append("  }")
+            main.append('  printf("BM\\t%d\\t%d\\t%d\\n", m, killed, tried);')
+            main.append("}")
             main.append("return 0; }")
-            covdef = [f"static long long dv_cov[{len(self.cov) + 1}];", "#define DV_COV(i) (dv_cov[i]++)"]
+            covdef = [f"static long long dv_cov[{len(self.cov) + 1}];", "#define DV_COV(i) (dv_cov[i]++)",
+                      f"static unsigned char dv_seen[{len(ck.fns) + 1}];",
+                      "static int dv_bm = 0; static long long dv_steps = 0, dv_fuel = 0;",
+                      '#define DV_STEP do { dv_steps++; if (dv_bm && --dv_fuel < 0) dv_trap("mutant ran too long", "mutant"); } while (0)',
+                      "#define DV_ENTER(k) do { dv_seen[k] = 1; DV_STEP; } while (0)"]
             mut = [f"static int dv_depth[{len(ck.fns) + 1}];", f"static int dv_ran[{len(ck.fns) + 1}];",
                    "static int dv_mut_mode, dv_mut_target = -1, dv_mut_fired, dv_quiet;",
                    # run example i twice more, with f's outermost result replaced by the zero / perturbed value
@@ -718,7 +797,7 @@ class CGen:
                    "}"]
         else:
             main.append("int main(int argc, char** argv) { dv_argc = argc; dv_argv = argv; F_main(); return 0; }")
-            covdef = ["#define DV_COV(i)"]
+            covdef = ["#define DV_COV(i)", "#define DV_STEP"]
             mut = []
         types = self.gen_types()
         pre = open(os.path.join(HERE, 'rt_pre.h')).read()

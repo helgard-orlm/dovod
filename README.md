@@ -138,7 +138,7 @@ The full language is in [SPEC.md](SPEC.md) — designed to be read once, in one 
 
 ## Status
 
-Version 0.1, an experiment. Not in it yet: maps, generics, closures, namespaces, network/process effects, Unicode-aware text indexing (`Text` is indexed by bytes), proofs beyond examples. Related work that shares ideas: Vera (contracts + Z3 for LLM-written code), Hylo (mutable value semantics), Koka (effect types).
+Version 0.2, an experiment. Not in it yet: maps, generics, closures, namespaces, network/process effects, Unicode-aware text indexing (`Text` is indexed by bytes), proofs beyond examples. Related work that shares ideas: Vera (contracts + Z3 for LLM-written code), Hylo (mutable value semantics), Koka (effect types).
 
 Implementation: `dovod/syntax.py` (lexer, parser) → `dovod/check.py` (types, effects, evidence rules) → `dovod/cgen.py` (C backend with ownership) → `cc`. ~2,600 lines.
 

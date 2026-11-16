@@ -1,4 +1,4 @@
-# Dovod 0.1.1 — the whole language
+# Dovod 0.2 — the whole language
 
 Dovod ("довод": an argument, a piece of evidence) is a small compiled language designed for AI
 agents to write and for humans to trust. This file is the complete specification; read it once and
@@ -12,6 +12,7 @@ you can write Dovod. Files end in `.dv`. The compiler emits C and builds a nativ
 | can write tests that test nothing               | an example must call its own function; unreached branches are reported    |
 | reads code in fragments                         | no globals, no references, no hidden effects: a signature tells all       |
 | makes small slips (wrong name, missed case)     | no shadowing, no unused names, exhaustive `match`, no implicit conversion |
+| writes examples that look at too little         | `dovod weak` lists every small change to the code that no example notices |
 | hands code to a human who will not read it      | `dovod trust` prints what the program can touch and what is taken on faith|
 | has never seen this language                    | one way to do each thing; the spec is this file                           |
 
@@ -82,7 +83,8 @@ Clauses sit between the signature and the body, one per line, any order:
   tautology behind a division trap. Remaining known gap: an example built so that *both* mutants trap
   while the two sides are written differently is not judged.
   **Refutable is not strong:** `ex f(1) != 0` passes the rule but pins down almost nothing. The rule
-  removes examples that cannot fail; how much an example proves is judged by people and by witnesses.
+  removes examples that cannot fail; how much the examples prove is measured by **strength** (below),
+  and whether they prove the right thing — by witnesses.
 - `need <Bool expr>` — precondition over the parameters. Checked on every call.
 - `give <Bool expr>` — postcondition; must mention `out`. Checked on every return.
 - `assume "reason"` — "I could not example this; take it on faith because …". Allowed, but it is
@@ -104,6 +106,18 @@ Rules:
   Every function of FILE called directly from a W.dv function that has examples becomes `witnessed`
   (if it was `self-checked`) or `witness-failed` (if any of those examples fails); `assumed` and
   `partial` stay as they are, with the witness result in the notes.
+
+**Strength.** After the examples pass, the compiler makes small changes to each exampled function's
+body, one at a time — an Int/Float literal +1, `true`↔`false`, `<`↔`<=`, `>`↔`>=`, `==`↔`!=`, `+`↔`-`,
+`and`↔`or`, a dropped `not`, a removed assignment or `.push`/`.pop` — and re-runs the examples that
+reach that function. A change is *noticed* if some example stops passing (a trap, a failed `need`/`give`
+or a run that takes 10× longer than the original also count). `check` prints the total, `trust` shows
+`noticed/tried` per function, and `dovod weak FILE` lists every unnoticed change with its line:
+`f.dv:19:3: W-WEAK: in \`tidy\` no example notices if this assignment is removed`. Each such line is a place
+where the code could be wrong and every example would still pass: add an example that pins it down, or
+leave it when the change cannot matter (`max(ms, 0)` vs `max(ms, 1)` before `/ 1000`). Strength is
+information, not an error — but compare whole values (`ex f(x) == Rec(...)` or `== base() with { n: 2 }`)
+rather than one field, and try the boundaries; that is what raises it.
 
 Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand` · `video` (a window that plays media; Windows).
 There is no other way to reach the outside world, so the effects of `main` are the whole truth
@@ -127,10 +141,15 @@ for i in 0..n { … }          // i = 0, 1, …, n-1
 for x in xs { … }            // iterates a snapshot: changing xs inside is safe
 break / continue
 
-match value {                // only for enums and Opt; must cover every case
+match value {                // enums and Opt: must name every case (no `else` — a new variant must not slip by)
   Circle(r) => { … }         // bindings are FIELD NAMES of the variant, any subset, any order
   Rect(w, h) => { … }
   Dot => { … }
+}
+match key {                  // Int, Text, Bool: literal arms, several per arm with `,`, then a mandatory `else`
+  "N", "PGDN" => { … }
+  "Q" => { … }
+  else => { … }              // (a Bool match with both `true` and `false` needs no `else`)
 }
 match find(t, "=") {
   some(i) => { … }
@@ -154,8 +173,15 @@ data, copy it: `var mine = param`.
 ## Expressions
 
 Literals: `42` `3.5` `true` `false` `"text\n"` (escapes `\n \t \r \\ \" \0 \xNN` with NN in 00..7F) `[1, 2, 3]` `none` `some(x)`.
+`'a'` is an Int: the byte value of one ASCII character (`'0'` = 48, `'\n'`, `'\\'`, `'\''`) — for `byte(t, i) == '/'`.
+`[]` and `none` take their type from where they stand (a parameter, a field, a `return`); annotate a `let`.
 Constructors always name their fields: `Point(x: 1.0, y: 2.0)`, `Rect(w: 2.0, h: 3.0)`, `Dot`.
 Access: `p.x`, `xs[i]` (out of range traps).
+Changed copy of a record: `p with { x: 3.0 }` — `p` itself is untouched; fields may be separated by `,` or
+newlines. This is the way to "update" a record in pure code (not `var q = p` / `q.x = …` / `return q`).
+Calls may label arguments with the parameter name: `seek(p, delta: 5000, pos: 0)`. A label must match the
+parameter at that position (labels check the order; they never reorder). Use them whenever two
+neighbouring arguments have the same type. Built-ins take no labels.
 
 Operators, lowest to highest: `or` · `and` · `not` · `== != < <= > >=` (do not chain) · `+ -` ·
 `* / %` · unary `-`. `and`/`or` are lazy. `+` also joins two `Text` or two lists of the same type.
@@ -212,6 +238,7 @@ dovod build FILE [-o OUT] [--target native|win64|win32]
                             check, compile to a binary; win64/win32 = Windows .exe (needs MinGW)
 dovod trust FILE [--witness W.dv] [--json]
                             the ledger: capabilities, per-function status, what is taken on faith
+dovod weak FILE             every small change to the code that no example notices (see Strength)
 dovod card FILE             interface only: signatures, contracts, two examples each — hand this to
                             another agent instead of the source
 dovod spec                  this file
@@ -219,9 +246,11 @@ dovod spec                  this file
 
 Workflow for an agent: write the signature and the examples first, put `?todo` in the body, run
 `check`, read the diagnostics (`--json` for machines), fill in, repeat until `OK`; then read
-`trust` and remove every `partial` and every avoidable `assume`.
+`trust` and remove every `partial` and every avoidable `assume`; then run `weak` and pin down what
+it lists. The ledger ends with what no example can reach (the C runtime, an effect's native code, the
+shells, whether the task was understood) — say so to the human instead of "all checked".
 
-## Not in 0.1 (deliberately small)
+## Not in 0.2 (deliberately small)
 
 Maps, generics, closures, modules with namespaces, Unicode-aware text indexing, a formatter, network
 and process effects, proofs beyond examples. Known gap: calls made only inside `ex`/`need`/`give` are not

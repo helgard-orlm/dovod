@@ -1,0 +1,32 @@
+// `dovod weak` must point at what the examples do not pin down.
+record R { a: Int, b: Int }
+
+fn grade(n: Int) -> Text          // the boundary 50 itself is never tried
+  ex grade(80) == "pass"
+  ex grade(10) == "fail"
+{
+  if n >= 50 {
+    return "pass"
+  }
+  return "fail"
+}
+
+fn tidy(r: R) -> R                // nobody looks at .b
+  ex tidy(R(a: 5, b: 5)).a == 0
+{
+  var q = r
+  q.a = 0
+  q.b = 0
+  return q
+}
+
+fn spin(n: Int) -> Int            // removing `i = i + 1` loops forever: that counts as noticed
+  ex spin(3) == 3
+  ex spin(0) == 0
+{
+  var i = 0
+  while i < n {
+    i = i + 1
+  }
+  return i
+}

@@ -66,11 +66,25 @@ def compile_c(csrc, out, opt, target='native', gui=False):
                          + r.stderr[:3000])
 
 
+def big_stack():
+    """Examples run under mutants may recurse far deeper than the real code; give them room."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        want = 1 << 30
+        if hard != resource.RLIM_INFINITY:
+            want = min(want, hard)
+        resource.setrlimit(resource.RLIMIT_STACK, (want, hard))
+    except Exception:
+        pass
+
+
 class Result:
     def __init__(self):
         self.diags, self.warns, self.fns = [], [], []
         self.ck = None
         self.ok = False
+        self.bm_partial = False
 
 
 def analyse(path, run_examples=True):
@@ -92,7 +106,8 @@ def analyse(path, run_examples=True):
         kind = 'shell' if (f.uses or f.name == 'main') else ('assumed' if n.assume else 'self-checked')
         rep[f.name] = {'name': f.name, 'status': kind, 'uses': list(f.uses), 'examples': len(n.exs), 'passed': 0,
                        'blocks': 0, 'hit': 0, 'unreached': [], 'assume': n.assume[0] if n.assume else None,
-                       'line': n.line, 'lines': n.end_line - n.line + 1, 'file': n.file}
+                       'line': n.line, 'lines': n.end_line - n.line + 1, 'file': n.file,
+                       'mutants': 0, 'killed': 0, 'weak': []}
     if run_examples:
         gen = CGen(ck, 'test')
         csrc = gen.program()
@@ -101,7 +116,7 @@ def analyse(path, run_examples=True):
             exe = os.path.join(tmp, 'test')
             compile_c(csrc, exe, '-O0')
             try:
-                out = subprocess.run([exe], capture_output=True, text=True, timeout=60)
+                out = subprocess.run([exe], capture_output=True, text=True, timeout=60, preexec_fn=big_stack)
                 lines, crashed = out.stdout.splitlines(), out.returncode != 0
                 why = f"crashed (exit code {out.returncode}; e.g. stack overflow from deep recursion)"
             except subprocess.TimeoutExpired as ex:
@@ -146,6 +161,17 @@ def analyse(path, run_examples=True):
             elif p[0] == 'COV':
                 c = gen.cov[int(p[1])]
                 c['count'] = int(p[2])
+            elif p[0] == 'BM':
+                m = gen.bmuts[int(p[1]) - 1]
+                if int(p[3]):
+                    r = rep[m['fn']]
+                    r['mutants'] += 1
+                    if int(p[2]):
+                        r['killed'] += 1
+                    else:
+                        r['weak'].append(m)
+            elif p[0] == 'BMSTOP':
+                res.bm_partial = True
         if crashed:
             for i, (fn, e) in enumerate(gen.exs):
                 if i not in done:
@@ -197,7 +223,8 @@ def report(res, as_json, quiet_ok=False):
     if as_json:
         print(json.dumps({'ok': res.ok, 'errors': [d.to_dict() for d in res.diags],
                           'warnings': [d.to_dict() for d in res.warns],
-                          'functions': [{k: v for k, v in f.items() if k not in ('file',)} for f in res.fns]},
+                          'functions': [{k: ([{x: m[x] for x in ('line', 'col', 'what')} for m in v] if k == 'weak' else v)
+                                         for k, v in f.items() if k not in ('file',)} for f in res.fns]},
                          ensure_ascii=False, indent=1))
         return
     for d in res.diags:
@@ -210,6 +237,11 @@ def report(res, as_json, quiet_ok=False):
         ex = sum(f['passed'] for f in res.fns)
         print(f"OK: {len(res.fns)} function(s), {ex} example(s) passed"
               + (f", {len(res.warns)} warning(s)" if res.warns else ''))
+        mt, kl = sum(f['mutants'] for f in res.fns), sum(f['killed'] for f in res.fns)
+        if mt:
+            print(f"strength: the examples notice {kl} of {mt} small changes to the code"
+                  + (f" — `dovod weak` lists the {mt - kl} they miss" if kl < mt else '')
+                  + (" (time limit hit: not all changes were tried)" if res.bm_partial else ''))
 
 
 def manifest(ck):
@@ -265,7 +297,7 @@ def cmd_trust(res, path, witness=None):
           + "; network; run other programs")
     print()
     w = max([len('function')] + [len(f['name']) for f in res.fns])
-    print(f"  {'function'.ljust(w)}  status          examples  blocks  notes")
+    print(f"  {'function'.ljust(w)}  status          examples  blocks  strength  notes")
     for f in res.fns:
         st = f['status']
         exs = f"{f['passed']}/{f['examples']}" if st not in ('shell', 'assumed') or f['examples'] else '-'
@@ -281,7 +313,8 @@ def cmd_trust(res, path, witness=None):
             notes.append(f"independent examples passed: {f['witness']}")
         if f['rests_on']:
             notes.append("rests on assumed: " + ', '.join(f['rests_on']))
-        print(f"  {f['name'].ljust(w)}  {st.ljust(14)}  {exs.ljust(8)}  {bl.ljust(6)}  {'; '.join(notes)}")
+        sg = f"{f['killed']}/{f['mutants']}" if f['mutants'] else '-'
+        print(f"  {f['name'].ljust(w)}  {st.ljust(14)}  {exs.ljust(8)}  {bl.ljust(6)}  {sg.ljust(8)}  {'; '.join(notes)}")
     cnt = {}
     for f in res.fns:
         cnt[f['status']] = cnt.get(f['status'], 0) + 1
@@ -294,6 +327,8 @@ def cmd_trust(res, path, witness=None):
             print(f"    {d.file}:{d.line}: {d.msg}")
         print()
     print("  self-checked = agrees with its author's own examples: catches slips, not a misread task.")
+    print("  strength     = how many small changes to the body (a number +1, `<` to `<=`, `+` to `-`, a removed")
+    print("                 assignment...) make some example fail. `dovod weak FILE` lists the ones nothing notices.")
     print("  witnessed    = also passed examples written by someone else (--witness FILE).")
     print("  summary: " + ', '.join(f"{v} {k}" for k, v in cnt.items())
           + f". Unchecked shell = {shell} of {total} function lines ({100 * shell // max(total, 1)}%).")
@@ -305,6 +340,44 @@ def cmd_trust(res, path, witness=None):
             print(f"    - {f['name']}: \"{f['assume']}\"" + (f"  -> affects: {', '.join(deps)}" if deps else ''))
     else:
         print("  taken on faith: nothing.")
+    print("  outside this ledger (no example reaches it):")
+    for line in outside(ck):
+        print("    - " + line)
+
+
+def clines(name):
+    try:
+        return sum(1 for _ in open(os.path.join(HERE, name), encoding='utf-8'))
+    except OSError:
+        return 0
+
+
+def outside(ck):
+    """What the examples can never vouch for: code that is not Dovod."""
+    used = set(u for f in ck.fns.values() for u in f.uses)
+    out = [f"Dovod's C runtime under every program (text, lists, traps): {clines('rt_pre.h') + clines('rt_post.h')} lines of C"]
+    if 'video' in used:
+        out.append(f"the `video` effect: {clines('rt_video.h')} lines of C over Windows Media Foundation — the window, "
+                   "its buttons, decoding and sound. Whether a file plays, has sound or the window is usable is NOT checked here")
+    shells = [f.name for f in ck.fns.values() if f.uses or f.name == 'main']
+    if shells:
+        out.append("the shell functions themselves (" + ', '.join(shells) + "): they run only in the real program")
+    out.append("whether the task was understood: examples by the code's author share the author's reading of it")
+    return out
+
+
+def cmd_weak(res):
+    n = 0
+    for f in res.fns:
+        for m in f['weak']:
+            n += 1
+            print(f"{m['file']}:{m['line']}:{m['col']}: W-WEAK: in `{f['name']}` no example notices if {m['what']}")
+    mt, kl = sum(f['mutants'] for f in res.fns), sum(f['killed'] for f in res.fns)
+    print(f"{kl} of {mt} small changes are noticed by the examples; {n} are not."
+          + (" Time limit hit: not all were tried." if res.bm_partial else ''))
+    if n:
+        print("Each line above is a place where the code could be wrong and every example would still pass.\n"
+              "Add an example that pins it down — or leave it if the change cannot matter (e.g. `<` vs `<=` where both give the same result).")
 
 
 def cmd_card(ck, path):
@@ -351,6 +424,7 @@ USAGE = """dovod — a language where code carries its evidence
   dovod trust FILE [--witness W.dv] [--json]
                                 ledger: what the program can do, what is checked, what is assumed;
                                 W.dv = examples by another author (`use`s FILE)
+  dovod weak  FILE              places where the code could change and no example would notice
   dovod card  FILE              interface only (signatures, contracts, examples) for another agent
   dovod spec                    print the whole language spec (fits in one context window)
 """
@@ -365,7 +439,7 @@ def main(argv=None):
     if cmd == 'spec':
         print(open(os.path.join(ROOT, 'SPEC.md'), encoding='utf-8').read())
         return 0
-    if cmd not in ('check', 'run', 'build', 'trust', 'card') or not a:
+    if cmd not in ('check', 'run', 'build', 'trust', 'card', 'weak') or not a:
         print(USAGE, file=sys.stderr)
         return 2
     as_json = '--json' in a
@@ -383,6 +457,12 @@ def main(argv=None):
     if cmd == 'check':
         report(res, as_json)
         return 0 if res.ok else 1
+    if cmd == 'weak':
+        if not res.ok:
+            report(res, False)
+            return 1
+        cmd_weak(res)
+        return 0
     if cmd == 'trust':
         wit = None
         if res.ok and '--witness' in a:

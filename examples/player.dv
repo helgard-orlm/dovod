@@ -68,6 +68,8 @@ fn clamp(x: Int, lo: Int, hi: Int) -> Int
 fn pad2(n: Int) -> Text
   need n >= 0
   ex pad2(7) == "07"
+  ex pad2(9) == "09"
+  ex pad2(10) == "10"
   ex pad2(42) == "42"
 {
   if n < 10 {
@@ -79,8 +81,10 @@ fn pad2(n: Int) -> Text
 fn fmt_time(ms: Int) -> Text
   ex fmt_time(0) == "0:00"
   ex fmt_time(65999) == "1:05"
+  ex fmt_time(3599000) == "59:59"
+  ex fmt_time(3600000) == "1:00:00"
   ex fmt_time(3723000) == "1:02:03"
-  ex fmt_time(-5) == "0:00"
+  ex fmt_time(-5000) == "0:00"
 {
   let s = max(ms, 0) / 1000
   let h = s / 3600
@@ -113,11 +117,12 @@ fn base_name(path: Text) -> Text
   ex base_name("C:\\Video\\кино.mp4") == "кино.mp4"
   ex base_name("/home/a/b.mkv") == "b.mkv"
   ex base_name("clip.avi") == "clip.avi"
+  ex base_name("/x") == "x"
 {
   var from = 0
   for i in 0..len(path) {
     let b = byte(path, i)
-    if b == 92 or b == 47 {
+    if b == '\\' or b == '/' {
       from = i + 1
     }
   }
@@ -173,9 +178,8 @@ fn parse_event(ev: Text) -> Ev
 // ---------------------------------------------------------------- the player
 
 fn new_player(files: List[Text]) -> Player
-  ex new_player(["a.mp4"]).files == ["a.mp4"]
-  ex new_player([]).vol == 100
-  ex new_player([]).idx == -1
+  ex new_player(["a.mp4"]) == Player(files: ["a.mp4"], idx: -1, paused: false, ended: false, vol: 100, muted: false,
+                                     full: false, rate: 100, note: "", note_until: 0, quit: false)
 {
   return Player(files: files, idx: -1, paused: false, ended: false, vol: 100, muted: false, full: false,
                 rate: 100, note: "", note_until: 0, quit: false)
@@ -186,31 +190,23 @@ fn playing() -> Player
   ex playing().idx == 0
   ex len(playing().files) == 2
 {
-  var p = new_player(["C:\\v\\one.mp4", "C:\\v\\two.mkv"])
-  p.idx = 0
-  return p
+  return new_player(["C:\\v\\one.mp4", "C:\\v\\two.mkv"]) with { idx: 0 }
 }
 
 fn with_note(p: Player, text: Text, now: Int) -> Player
-  ex with_note(playing(), "hi", 1000).note == "hi"
-  ex with_note(playing(), "hi", 1000).note_until == 5000
+  ex with_note(playing(), "hi", now: 1000) == playing() with { note: "hi", note_until: 5000 }
 {
-  var q = p
-  q.note = text
-  q.note_until = now + note_ms
-  return q
+  return p with { note: text, note_until: now + note_ms }
 }
 
 fn open_at(p: Player, i: Int) -> Step
   need i >= 0 and i < len(p.files)
   ex open_at(playing(), 1).cmds == [Open(path: "C:\\v\\two.mkv"), Title(text: "two.mkv — Dovod Player")]
-  ex open_at(playing(), 1).p.idx == 1
+  ex open_at(playing(), 1).p == playing() with { idx: 1 }
+  ex open_at(playing() with { paused: true, ended: true }, 1).p == playing() with { idx: 1 }
 {
-  var q = p
-  q.idx = i
-  q.paused = false
-  q.ended = false
-  return Step(p: q, cmds: [Open(path: p.files[i]), Title(text: base_name(p.files[i]) + " — Dovod Player")])
+  return Step(p: p with { idx: i, paused: false, ended: false },
+              cmds: [Open(path: p.files[i]), Title(text: base_name(p.files[i]) + " — Dovod Player")])
 }
 
 fn start(p: Player) -> Step
@@ -224,85 +220,76 @@ fn start(p: Player) -> Step
 }
 
 fn seek_by(p: Player, delta: Int, pos: Int, dur: Int) -> Step
-  ex seek_by(playing(), 5000, 10000, 60000).cmds == [Seek(ms: 15000)]
-  ex seek_by(playing(), -5000, 3000, 60000).cmds == [Seek(ms: 0)]
-  ex seek_by(playing(), 60000, 30000, 60000).cmds == [Seek(ms: 59000)]
-  ex seek_by(playing(), 5000, 1000, 0).cmds == [Seek(ms: 6000)]
+  ex seek_by(playing(), delta: 5000, pos: 10000, dur: 60000).cmds == [Seek(ms: 15000)]
+  ex seek_by(playing(), delta: -5000, pos: 3000, dur: 60000).cmds == [Seek(ms: 0)]
+  ex seek_by(playing(), delta: 60000, pos: 30000, dur: 60000).cmds == [Seek(ms: 59000)]
+  ex seek_by(playing(), delta: 5000, pos: 1000, dur: 0).cmds == [Seek(ms: 6000)]
+  ex seek_by(playing(), delta: 5000, pos: 100, dur: 500).cmds == [Seek(ms: 0)]
+  ex seek_by(playing() with { ended: true }, delta: -5000, pos: 9000, dur: 9000).p == playing()
 {
   var target = max(pos + delta, 0)
   if dur > 0 {
     target = min(target, max(dur - 1000, 0))
   }
-  var q = p
-  q.ended = false
-  return Step(p: q, cmds: [Seek(ms: target)])
+  return Step(p: p with { ended: false }, cmds: [Seek(ms: target)])
 }
 
 fn set_volume(p: Player, vol: Int, now: Int) -> Step
-  ex set_volume(playing(), 120, 0).cmds == [Volume(pct: 100), Mute(on: false)]
-  ex set_volume(playing(), 40, 0).p.note == "Громкость 40%"
+  ex set_volume(playing(), 120, now: 0).cmds == [Volume(pct: 100), Mute(on: false)]
+  ex set_volume(playing(), -7, now: 0).cmds == [Volume(pct: 0), Mute(on: false)]
+  ex set_volume(playing() with { muted: true }, 40, now: 1000).p ==
+     playing() with { vol: 40, note: "Громкость 40%", note_until: 5000 }
 {
-  var q = with_note(p, "", now)
-  q.vol = clamp(vol, 0, 100)
-  q.muted = false
-  q.note = "Громкость " + show(q.vol) + "%"
-  return Step(p: q, cmds: [Volume(pct: q.vol), Mute(on: false)])
+  let v = clamp(vol, 0, 100)
+  return Step(p: with_note(p, "Громкость " + show(v) + "%", now) with { vol: v, muted: false },
+              cmds: [Volume(pct: v), Mute(on: false)])
 }
 
 fn set_rate(p: Player, rate: Int, now: Int) -> Step
-  ex set_rate(playing(), 125, 0).cmds == [Rate(pct: 125)]
-  ex set_rate(playing(), 500, 0).p.rate == 400
-  ex set_rate(playing(), 10, 0).p.note == "Скорость ×0.25"
+  ex set_rate(playing(), 125, now: 0).cmds == [Rate(pct: 125)]
+  ex set_rate(playing(), 500, now: 0).p.rate == 400
+  ex set_rate(playing(), 10, now: 0).p.note == "Скорость ×0.25"
 {
-  var q = p
-  q.rate = clamp(rate, 25, 400)
-  return Step(p: with_note(q, "Скорость ×" + rate_text(q.rate), now), cmds: [Rate(pct: q.rate)])
+  let r = clamp(rate, 25, 400)
+  return Step(p: with_note(p, "Скорость ×" + rate_text(r), now) with { rate: r }, cmds: [Rate(pct: r)])
 }
 
 fn toggle_pause(p: Player) -> Step
-  ex toggle_pause(playing()).cmds == [Pause(on: true)]
-  ex toggle_pause(toggle_pause(playing()).p).cmds == [Pause(on: false)]
+  ex toggle_pause(playing()) == Step(p: playing() with { paused: true }, cmds: [Pause(on: true)])
+  ex toggle_pause(playing() with { paused: true }) == Step(p: playing(), cmds: [Pause(on: false)])
   ex toggle_pause(new_player([])).cmds == []
+  ex toggle_pause(playing() with { ended: true, paused: true }) == Step(p: playing(), cmds: [Seek(ms: 0), Pause(on: false)])
 {
-  let none_cmds: List[Cmd] = []
   if p.idx < 0 {
-    return Step(p: p, cmds: none_cmds)
+    return Step(p: p, cmds: [])
   }
-  var q = p
   if p.ended {
-    q.ended = false
-    q.paused = false
-    return Step(p: q, cmds: [Seek(ms: 0), Pause(on: false)])
+    return Step(p: p with { ended: false, paused: false }, cmds: [Seek(ms: 0), Pause(on: false)])
   }
-  q.paused = not p.paused
-  return Step(p: q, cmds: [Pause(on: q.paused)])
+  return Step(p: p with { paused: not p.paused }, cmds: [Pause(on: not p.paused)])
 }
 
 fn set_full(p: Player, on: Bool) -> Step
-  ex set_full(playing(), true).cmds == [Full(on: true)]
-  ex set_full(playing(), true).p.full == true
+  ex set_full(playing(), true) == Step(p: playing() with { full: true }, cmds: [Full(on: true)])
 {
-  var q = p
-  q.full = on
-  return Step(p: q, cmds: [Full(on: on)])
+  return Step(p: p with { full: on }, cmds: [Full(on: on)])
 }
 
 fn go(p: Player, delta: Int, now: Int) -> Step
-  ex go(playing(), 1, 0).p.idx == 1
-  ex go(playing(), -1, 0).p.note == "Это первый файл"
-  ex go(go(playing(), 1, 0).p, 1, 0).p.note == "Это последний файл"
-  ex go(new_player([]), 1, 0).cmds == []
+  ex go(playing(), 1, now: 0).p.idx == 1
+  ex go(playing(), -1, now: 0).p.note == "Это первый файл"
+  ex go(go(playing(), 1, now: 0).p, 1, now: 0).p.note == "Это последний файл"
+  ex go(new_player([]), 1, now: 0).cmds == []
 {
-  let none_cmds: List[Cmd] = []
   if p.idx < 0 {
-    return Step(p: p, cmds: none_cmds)
+    return Step(p: p, cmds: [])
   }
   let i = p.idx + delta
   if i < 0 {
-    return Step(p: with_note(p, "Это первый файл", now), cmds: none_cmds)
+    return Step(p: with_note(p, "Это первый файл", now), cmds: [])
   }
   if i >= len(p.files) {
-    return Step(p: with_note(p, "Это последний файл", now), cmds: none_cmds)
+    return Step(p: with_note(p, "Это последний файл", now), cmds: [])
   }
   return open_at(p, i)
 }
@@ -315,99 +302,69 @@ fn on_key(p: Player, key: Text, pos: Int, dur: Int, now: Int) -> Step
   ex on_key(playing(), "shift+LEFT", 90000, 600000, 0).cmds == [Seek(ms: 30000)]
   ex on_key(playing(), "HOME", 90000, 600000, 0).cmds == [Seek(ms: 0)]
   ex on_key(playing(), "5", 0, 600000, 0).cmds == [Seek(ms: 300000)]
+  ex on_key(playing(), "0", 7000, 600000, 0).cmds == [Seek(ms: 0)]
+  ex on_key(playing(), "9", 7000, 600000, 0).cmds == [Seek(ms: 540000)]
+  ex on_key(playing(), "/", 7000, 600000, 0).cmds == []
+  ex on_key(playing(), ":", 7000, 600000, 0).cmds == []
+  ex on_key(playing(), "55", 7000, 600000, 0).cmds == []
   ex on_key(playing(), "UP", 0, 0, 0).cmds == [Volume(pct: 100), Mute(on: false)]
   ex on_key(playing(), "DOWN", 0, 0, 0).cmds == [Volume(pct: 95), Mute(on: false)]
   ex on_key(playing(), "M", 0, 0, 0).cmds == [Mute(on: true)]
   ex on_key(playing(), "]", 0, 0, 0).cmds == [Rate(pct: 125)]
   ex on_key(playing(), "[", 0, 0, 0).cmds == [Rate(pct: 75)]
-  ex on_key(set_rate(playing(), 200, 0).p, "BACKSPACE", 0, 0, 0).cmds == [Rate(pct: 100)]
+  ex on_key(set_rate(playing(), 200, now: 0).p, "BACKSPACE", 0, 0, 0).cmds == [Rate(pct: 100)]
   ex on_key(playing(), "F", 0, 0, 0).cmds == [Full(on: true)]
   ex on_key(playing(), "ENTER", 0, 0, 0).cmds == [Full(on: true)]
   ex on_key(set_full(playing(), true).p, "ESC", 0, 0, 0).cmds == [Full(on: false)]
   ex on_key(playing(), "ESC", 0, 0, 0).cmds == []
   ex on_key(playing(), "N", 0, 0, 0).p.idx == 1
   ex on_key(playing(), "PGDN", 0, 0, 0).p.idx == 1
-  ex on_key(go(playing(), 1, 0).p, "P", 0, 0, 0).p.idx == 0
-  ex on_key(go(playing(), 1, 0).p, "PGUP", 0, 0, 0).p.idx == 0
+  ex on_key(go(playing(), 1, now: 0).p, "P", 0, 0, 0).p.idx == 0
+  ex on_key(go(playing(), 1, now: 0).p, "PGUP", 0, 0, 0).p.idx == 0
   ex on_key(playing(), "O", 0, 0, 0).cmds == [Pick]
   ex on_key(playing(), "Q", 0, 0, 0).p.quit == true
-  ex on_key(playing(), "F1", 0, 0, 7).p.note == help
-  ex on_key(playing(), "ctrl+Z", 0, 0, 0).cmds == []
-{
-  let none_cmds: List[Cmd] = []
-  if key == "SPACE" {
-    return toggle_pause(p)
-  }
-  if key == "RIGHT" or key == "LEFT" or key == "shift+RIGHT" or key == "shift+LEFT" {
-    var step = seek_small
-    if starts_with(key, "shift+") {
-      step = seek_big
+  ex on_key(playing(), "F1", 0, 0, 7).p == playing() with { note: help, note_until: 12007 }
+  ex on_key(playing(), "M", 0, 0, 0).p.muted == true
+  ex on_key(playing() with { muted: true }, "M", 0, 0, 0).p.note == "Звук включён"
+  ex on_key(playing(), "ctrl+Z", 0, 0, 0).cmds == []{
+  match key {
+    "SPACE" => { return toggle_pause(p) }
+    "RIGHT" => { return seek_by(p, delta: seek_small, pos: pos, dur: dur) }
+    "LEFT" => { return seek_by(p, delta: -seek_small, pos: pos, dur: dur) }
+    "shift+RIGHT" => { return seek_by(p, delta: seek_big, pos: pos, dur: dur) }
+    "shift+LEFT" => { return seek_by(p, delta: -seek_big, pos: pos, dur: dur) }
+    "HOME" => { return seek_by(p, delta: -pos, pos: pos, dur: dur) }
+    "UP" => { return set_volume(p, p.vol + vol_step, now) }
+    "DOWN" => { return set_volume(p, p.vol - vol_step, now) }
+    "M" => {
+      var msg = "Звук включён"
+      if not p.muted {
+        msg = "Звук выключен"
+      }
+      return Step(p: with_note(p, msg, now) with { muted: not p.muted }, cmds: [Mute(on: not p.muted)])
     }
-    if ends_with(key, "LEFT") {
-      step = -step
+    "]" => { return set_rate(p, p.rate + 25, now) }
+    "[" => { return set_rate(p, p.rate - 25, now) }
+    "BACKSPACE" => { return set_rate(p, 100, now) }
+    "F", "ENTER" => { return set_full(p, not p.full) }
+    "ESC" => {
+      if p.full {
+        return set_full(p, false)
+      }
+      return Step(p: p, cmds: [])
     }
-    return seek_by(p, step, pos, dur)
-  }
-  if key == "HOME" {
-    return seek_by(p, -pos, pos, dur)
-  }
-  if len(key) == 1 and byte(key, 0) >= 48 and byte(key, 0) <= 57 {
-    let tenth = byte(key, 0) - 48
-    return seek_by(p, dur / 10 * tenth - pos, pos, dur)
-  }
-  if key == "UP" {
-    return set_volume(p, p.vol + vol_step, now)
-  }
-  if key == "DOWN" {
-    return set_volume(p, p.vol - vol_step, now)
-  }
-  if key == "M" {
-    var q = p
-    q.muted = not p.muted
-    var msg = "Звук включён"
-    if q.muted {
-      msg = "Звук выключен"
+    "N", "PGDN" => { return go(p, 1, now) }
+    "P", "PGUP" => { return go(p, -1, now) }
+    "O" => { return Step(p: p, cmds: [Pick]) }
+    "Q" => { return Step(p: p with { quit: true }, cmds: []) }
+    "F1" => { return Step(p: p with { note: help, note_until: now + 3 * note_ms }, cmds: []) }
+    else => {
+      if len(key) == 1 and byte(key, 0) >= '0' and byte(key, 0) <= '9' {   // 0–9: jump to that tenth
+        return seek_by(p, delta: dur / 10 * (byte(key, 0) - '0') - pos, pos: pos, dur: dur)
+      }
+      return Step(p: p, cmds: [])
     }
-    return Step(p: with_note(q, msg, now), cmds: [Mute(on: q.muted)])
   }
-  if key == "]" {
-    return set_rate(p, p.rate + 25, now)
-  }
-  if key == "[" {
-    return set_rate(p, p.rate - 25, now)
-  }
-  if key == "BACKSPACE" {
-    return set_rate(p, 100, now)
-  }
-  if key == "F" or key == "ENTER" {
-    return set_full(p, not p.full)
-  }
-  if key == "ESC" {
-    if p.full {
-      return set_full(p, false)
-    }
-    return Step(p: p, cmds: none_cmds)
-  }
-  if key == "N" or key == "PGDN" {
-    return go(p, 1, now)
-  }
-  if key == "P" or key == "PGUP" {
-    return go(p, -1, now)
-  }
-  if key == "O" {
-    return Step(p: p, cmds: [Pick])
-  }
-  if key == "Q" {
-    var q = p
-    q.quit = true
-    return Step(p: q, cmds: none_cmds)
-  }
-  if key == "F1" {
-    var q = with_note(p, help, now)
-    q.note_until = now + 3 * note_ms
-    return Step(p: q, cmds: none_cmds)
-  }
-  return Step(p: p, cmds: none_cmds)
 }
 
 fn on_event(p: Player, ev: Ev, pos: Int, dur: Int, now: Int) -> Step
@@ -419,15 +376,14 @@ fn on_event(p: Player, ev: Ev, pos: Int, dur: Int, now: Int) -> Step
   ex on_event(playing(), Wheel(up: true), 0, 0, 0).p.vol == 100
   ex on_event(playing(), Drop(paths: ["D:\\new.mp4"]), 0, 0, 0).cmds == [Open(path: "D:\\new.mp4"), Title(text: "new.mp4 — Dovod Player")]
   ex on_event(playing(), Drop(paths: ["D:\\new.mp4"]), 0, 0, 0).p.files == ["D:\\new.mp4"]
-  ex on_event(toggle_pause(playing()).p, Loaded, 0, 0, 0).p.paused == false
+  ex on_event(playing() with { paused: true, ended: true }, Loaded, 0, 0, 0).p == playing()
   ex on_event(playing(), Ended, 0, 0, 0).p.idx == 1
-  ex on_event(go(playing(), 1, 0).p, Ended, 0, 0, 0).p.ended == true
+  ex on_event(playing() with { idx: 1 }, Ended, 0, 0, 5).p ==
+     playing() with { idx: 1, ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: 3600005 }
   ex on_event(playing(), Closed, 0, 0, 0).p.quit == true
-  ex on_event(playing(), Failed(msg: "no decoder"), 0, 0, 0).p.note == "Ошибка: no decoder"
-{
-  let none_cmds: List[Cmd] = []
+  ex on_event(playing(), Failed(msg: "no decoder"), 0, 0, 5).p == playing() with { note: "Ошибка: no decoder", note_until: 12005 }{
   match ev {
-    Tick => { return Step(p: p, cmds: none_cmds) }
+    Tick => { return Step(p: p, cmds: []) }
     Key(name) => { return on_key(p, name, pos, dur, now) }
     Click => { return toggle_pause(p) }
     DblClick => { return set_full(p, not p.full) }
@@ -438,53 +394,34 @@ fn on_event(p: Player, ev: Ev, pos: Int, dur: Int, now: Int) -> Step
       return set_volume(p, p.vol - vol_step, now)
     }
     Drop(paths) => { return open_at(new_player_like(p, paths), 0) }
-    Loaded => {
-      var q = p
-      q.paused = false
-      q.ended = false
-      return Step(p: q, cmds: none_cmds)
-    }
+    Loaded => { return Step(p: p with { paused: false, ended: false }, cmds: []) }
     Ended => {
       if p.idx + 1 < len(p.files) {
         return open_at(p, p.idx + 1)
       }
-      var q = with_note(p, "Конец. Пробел — сначала", now)
-      q.ended = true
-      q.paused = true
-      q.note_until = now + 1000 * 3600
-      return Step(p: q, cmds: none_cmds)
+      return Step(p: p with { ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: now + 1000 * 3600 },
+                  cmds: [])
     }
-    Closed => {
-      var q = p
-      q.quit = true
-      return Step(p: q, cmds: none_cmds)
-    }
-    Failed(msg) => {
-      var q = with_note(p, "Ошибка: " + msg, now)
-      q.note_until = now + 3 * note_ms
-      return Step(p: q, cmds: none_cmds)
-    }
+    Closed => { return Step(p: p with { quit: true }, cmds: []) }
+    Failed(msg) => { return Step(p: p with { note: "Ошибка: " + msg, note_until: now + 3 * note_ms }, cmds: []) }
   }
 }
 
 // a new playlist, keeping the listener's settings (volume, speed, full screen)
 fn new_player_like(p: Player, files: List[Text]) -> Player
   need len(files) > 0
-  ex new_player_like(set_volume(playing(), 30, 0).p, ["z.mp4"]).vol == 30
-  ex new_player_like(playing(), ["z.mp4"]).files == ["z.mp4"]
+  ex new_player_like(playing() with { vol: 30 }, ["z.mp4"]) == new_player(["z.mp4"]) with { vol: 30 }
 {
-  var q = p
-  q.files = files
-  q.idx = -1
-  return q
+  return p with { files: files, idx: -1 }
 }
 
 fn status(p: Player, pos: Int, dur: Int, now: Int) -> Text
   ex status(new_player([]), 0, 0, 0) == "Перетащите видео в окно или нажмите O · F1 — клавиши"
-  ex status(with_note(new_player([]), "Ошибка: x", 0), 0, 0, 1) == "Ошибка: x   ·   Перетащите видео в окно или нажмите O · F1 — клавиши"
+  ex status(with_note(new_player([]), "Ошибка: x", now: 0), 0, 0, 1) == "Ошибка: x   ·   Перетащите видео в окно или нажмите O · F1 — клавиши"
   ex status(playing(), 65000, 600000, 0) == "Играет   1:05 / 10:00   Громкость 100%   Файл 1/2"
+  ex status(playing(), 65000, 1, 0) == "Играет   0:00 / 0:00   Громкость 100%   Файл 1/2"
   ex status(playing(), 22000, 20000, 0) == "Играет   0:20 / 0:20   Громкость 100%   Файл 1/2"
-  ex status(set_rate(toggle_pause(playing()).p, 150, 0).p, 0, 0, 9000) == "Пауза   0:00   Громкость 100%   ×1.5   Файл 1/2"
+  ex status(set_rate(toggle_pause(playing()).p, 150, now: 0).p, 0, 0, 9000) == "Пауза   0:00   Громкость 100%   ×1.5   Файл 1/2"
   ex status(on_key(playing(), "M", 0, 0, 0).p, 0, 0, 10) == "Играет   0:00   Без звука   Файл 1/2   ·   Звук выключен"
 {
   if p.idx < 0 {

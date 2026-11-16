@@ -40,14 +40,14 @@ class Node:
 KEYWORDS = {
     'fn', 'record', 'enum', 'const', 'use', 'let', 'var', 'if', 'else', 'while', 'for', 'in',
     'match', 'return', 'break', 'continue', 'and', 'or', 'not', 'true', 'false', 'none', 'some',
-    'uses', 'need', 'give', 'ex', 'assume',
+    'uses', 'need', 'give', 'ex', 'assume', 'with',
 }
 
 TOK_RE = re.compile(r'''
  (?P<ws>[ \t\r]+)|(?P<com>//[^\n]*)|(?P<nl>\n)|
  (?P<float>\d+\.\d+(?:[eE][+-]?\d+)?)|(?P<int>\d+)|
  (?P<id>[A-Za-z_][A-Za-z0-9_]*)|
- (?P<str>"(?:[^"\\\n]|\\.)*")|
+ (?P<str>"(?:[^"\\\n]|\\.)*")|(?P<chr>'(?:[^'\\\n]|\\.)')|
  (?P<op>->|=>|==|!=|<=|>=|\.\.|[-+*/%<>=(){}\[\],:.?])
 ''', re.X)
 
@@ -99,6 +99,15 @@ def lex(src, file):
                     out.append(c)
                     i += 1
             toks.append(Tok('str', ''.join(out), file, line, col, pos))
+        elif kind == 'chr':
+            body = val[1:-1]
+            ch = ESC.get(body[1]) if body[0] == '\\' else body
+            if body[0] == '\\' and body[1] == "'":
+                ch = "'"
+            if ch is None or ord(ch) > 0x7F:
+                raise DvError(Diag('E-SYNTAX', file, line, col, "a character literal is one ASCII character: 'a', '\\n', '\\\\', '\\''",
+                                   "it is an Int (the byte value); for other bytes write the number"))
+            toks.append(Tok('int', ord(ch), file, line, col, pos))
         elif kind == 'int':
             v = int(val)
             if v > 2 ** 63 - 1:
@@ -386,8 +395,33 @@ class Parser:
         self.end_stmt()
         return Node('If', tok, cond=cond, then=then, els=els)
 
+    def p_lit(self):
+        tok = self.peek()
+        if self.accept('op', '-'):
+            n = self.expect('int')
+            return Node('Int', tok, v=-n.val)
+        if tok.kind == 'int':
+            self.next()
+            return Node('Int', tok, v=tok.val)
+        if tok.kind == 'str':
+            self.next()
+            return Node('Str', tok, v=tok.val)
+        if tok.kind == 'kw' and tok.val in ('true', 'false'):
+            self.next()
+            return Node('Bool', tok, v=(tok.val == 'true'))
+        self.fail("expected a literal pattern (a number, a text or true/false)")
+
     def p_pattern(self):
         tok = self.peek()
+        if self.accept('kw', 'else'):
+            return Node('PElse', tok)
+        if tok.kind in ('int', 'str') or (tok.kind == 'op' and tok.val == '-') or \
+                (tok.kind == 'kw' and tok.val in ('true', 'false')):
+            lits = [self.p_lit()]
+            while self.accept('op', ','):
+                self.skip_nl()
+                lits.append(self.p_lit())
+            return Node('PLit', tok, lits=lits)
         if self.accept('kw', 'none'):
             return Node('PNone', tok)
         if self.accept('kw', 'some'):
@@ -466,13 +500,19 @@ class Parser:
         return self.p_postfix()
 
     def p_args(self):
-        args = []
+        """Returns (args, names): names[i] is the parameter name written at the call (`f(x, lo: 0)`) or None."""
+        args, names = [], []
         while not self.at('op', ')'):
+            nm = None
+            if self.at('id') and self.t[self.i + 1].kind == 'op' and self.t[self.i + 1].val == ':':
+                nm = self.next().val
+                self.next()
+            names.append(nm)
             args.append(self.p_expr())
             if not self.accept('op', ','):
                 break
         self.expect('op', ')')
-        return args
+        return args, names
 
     def p_postfix(self):
         e = self.p_primary()
@@ -481,13 +521,30 @@ class Parser:
             if self.accept('op', '.'):
                 name = self.expect('id').val
                 if self.accept('op', '('):
-                    e = Node('Method', tok, e=e, name=name, args=self.p_args())
+                    margs, mnames = self.p_args()
+                    if any(mnames):
+                        self.fail("`.push`/`.pop` take no named arguments", tok=tok)
+                    e = Node('Method', tok, e=e, name=name, args=margs)
                 else:
                     e = Node('Field', tok, e=e, name=name)
             elif self.accept('op', '['):
                 idx = self.p_expr()
                 self.expect('op', ']')
                 e = Node('Index', tok, e=e, i=idx)
+            elif self.accept('kw', 'with'):
+                self.expect('op', '{')
+                self.skip_nl()
+                fields = []
+                while not self.at('op', '}'):
+                    fn = self.expect('id')
+                    self.expect('op', ':')
+                    fields.append((fn.val, self.p_expr()))
+                    if not self.accept('op', ','):
+                        if not self.at('nl') and not self.at('op', '}'):
+                            self.fail("expected ',' or end of line between fields")
+                    self.skip_nl()
+                self.expect('op', '}')
+                e = Node('With', tok, e=e, fields=fields)
             else:
                 return e
 
@@ -511,7 +568,8 @@ class Parser:
             return Node('Some', tok, e=e)
         if k == 'id':
             if self.accept('op', '('):
-                return Node('Call', tok, name=v, args=self.p_args())
+                cargs, cnames = self.p_args()
+                return Node('Call', tok, name=v, args=cargs, argnames=cnames)
             return Node('Name', tok, name=v)
         if k == 'ty':
             fields = []

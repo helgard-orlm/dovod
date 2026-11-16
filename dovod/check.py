@@ -610,9 +610,17 @@ class Checker:
                 self.block(body)
             return
         is_opt = isinstance(t, tuple) and t[0] == 'Opt'
+        if t in ('Int', 'Text', 'Bool'):
+            return self.match_lit(s, t)
         if not is_opt and t not in self.enums:
-            self.err('E-TYPE', s.e, f"`match` needs an enum or Opt, got {tystr(t)}")
+            self.err('E-TYPE', s.e, f"`match` needs an enum, Opt, Int, Text or Bool, got {tystr(t)}")
+            for _, body in s.arms:
+                self.block(body)
             return
+        for pat, _ in s.arms:
+            if pat.k == 'PElse':
+                self.err('E-MATCH', pat, f"`else` is not allowed when matching {tystr(t)}: name every case",
+                         "that is the point of an enum — a new variant must not slip through silently")
         seen = []
         for pat, body in s.arms:
             self.push()
@@ -625,6 +633,8 @@ class Checker:
                 else:
                     key = None
                     self.err('E-TYPE', pat, f"matching {tystr(t)}: arms are `some(name)` and `none`")
+            elif pat.k == 'PElse':
+                key = None
             else:
                 key = None
                 if pat.k != 'PVariant' or pat.name not in self.variants or self.variants[pat.name][0] != t:
@@ -653,6 +663,29 @@ class Checker:
         if missing:
             arms = ' '.join(f"{'some(x)' if m == 'some' else m} => {{ ... }}" for m in missing)
             self.err('E-MATCH', s, "match does not cover: " + ', '.join(missing), f"add arms: {arms}")
+
+    def match_lit(self, s, t):
+        """`match` on Int / Text / Bool: arms are literals (`1, 2 => {}`), then a mandatory `else`."""
+        want_k = {'Int': 'Int', 'Text': 'Str', 'Bool': 'Bool'}[t]
+        seen, has_else = set(), False
+        for n, (pat, body) in enumerate(s.arms):
+            if pat.k == 'PElse':
+                has_else = True
+                if n != len(s.arms) - 1:
+                    self.err('E-MATCH', pat, "`else` must be the last arm")
+            elif pat.k != 'PLit':
+                self.err('E-TYPE', pat, f"matching {t}: arms are literals (`1, 2 => {{ ... }}`) and a final `else`")
+            else:
+                for lit in pat.lits:
+                    lit.ty = t
+                    if lit.k != want_k:
+                        self.err('E-TYPE', lit, f"this pattern is not a {t} literal")
+                    elif lit.v in seen:
+                        self.err('E-MATCH', lit, f"duplicate pattern `{lit.v!r}`".replace("'", '"'))
+                    seen.add(lit.v)
+            self.block(body)
+        if not has_else and not (t == 'Bool' and seen == {True, False}):
+            self.err('E-MATCH', s, f"a match on {t} cannot list every value", "add a last arm: `else => { ... }`")
 
     # -- expressions
     def mismatch(self, e, want, got):
@@ -738,6 +771,32 @@ class Checker:
             return ERR
         if k == 'Ctor':
             return self.ctor(e)
+        if k == 'With':
+            bt = self.expr(e.e, exp)
+            if bt != ERR and bt not in self.records:
+                self.err('E-TYPE', e, f"`with` changes fields of a record; this is {tystr(bt)}")
+                bt = ERR
+            if not e.fields:
+                self.err('E-ARGS', e, "`with { }` changes nothing", "name at least one field: `p with { x: 1 }`")
+            want = dict(self.records[bt]) if bt != ERR else {}
+            got = set()
+            for fname, fe in e.fields:
+                if bt == ERR:
+                    self.expr(fe)
+                    continue
+                if fname not in want:
+                    near = self.nearest(fname, want)
+                    self.err('E-NAME', fe, f"record `{bt}` has no field `{fname}`",
+                             f"did you mean `{near}`?" if near else "fields: " + ', '.join(want))
+                    self.expr(fe)
+                    continue
+                if fname in got:
+                    self.err('E-NAME', fe, f"field `{fname}` given twice")
+                got.add(fname)
+                ft = self.expr(fe, want[fname])
+                if not same(ft, want[fname]):
+                    self.mismatch(fe, want[fname], ft)
+            return bt
         if k == 'Un':
             if e.op == 'not':
                 t = self.expr(e.e, 'Bool')
@@ -844,11 +903,15 @@ class Checker:
         name = e.name
         f = self.cur
         if name in POLY:
+            if any(e.argnames):
+                self.err('E-ARGS', e, f"built-in `{name}` takes its arguments by position, without names")
             return self.poly(e, exp)
         if name in BUILTINS:
             params, ret, eff = BUILTINS[name]
             e.builtin, e.effectful = True, eff is not None
             self.args(e, params)
+            if any(e.argnames):
+                self.err('E-ARGS', e, f"built-in `{name}` takes its arguments by position, without names")
             if eff:
                 self.effect(e, eff)
             if ret == 'Never' and not stmt:
@@ -859,6 +922,11 @@ class Checker:
             g = self.fns[name]
             e.builtin, e.effectful = False, bool(g.uses)
             self.args(e, [t for _, t in g.params])
+            if len(e.args) == len(g.params):
+                for a, an, (pn, _) in zip(e.args, e.argnames, g.params):
+                    if an is not None and an != pn:
+                        self.err('E-ARGS', a, f"this argument is labelled `{an}` but this position of `{name}` is `{pn}`",
+                                 f"order: {name}(" + ', '.join(n for n, _ in g.params) + ") — labels check the order, they do not change it")
             for eff in g.uses:
                 if eff in EFFECTS:
                     self.effect(e, eff)
