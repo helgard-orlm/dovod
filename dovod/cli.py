@@ -223,7 +223,7 @@ def cmd_trust(res, path, witness=None):
     print("  cannot: " + '; '.join(EFFECT_DOC[u] for u in EFFECTS if u not in used)
           + "; network; run other programs")
     print()
-    w = max(len(f['name']) for f in res.fns)
+    w = max([len('function')] + [len(f['name']) for f in res.fns])
     print(f"  {'function'.ljust(w)}  status          examples  blocks  notes")
     for f in res.fns:
         st = f['status']

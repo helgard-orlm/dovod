@@ -77,10 +77,11 @@ another model) writes a *witness* file that `use`s the code:
 
 ```
 $ dovod trust examples/witness/rpn.dv --witness examples/witness/rpn_witness.dv
+
   function  status          examples  blocks  notes
-  rpn       witness-failed  12/12     2/2     independent examples passed: 8/9
+  rpn       witness-failed  12/12     11/11   independent examples passed: 8/9
+
   independent examples that failed:
-    examples/witness/rpn_witness.dv:44: example trapped: `w_overflow()` — integer overflow in + ...
 ```
 
 `rpn` was written by glm-5.3 in the exam below and passes all 12 of its own examples; the witness found
