@@ -1,0 +1,213 @@
+// Module `ble`: hear Bluetooth Low Energy devices around you (Windows). BLE devices — sensors, beacons,
+// bracelets, TVs, phones — keep shouting short packets ("advertisements") into the air: "I exist, here
+// is my name, here is what I can do". Windows hides them: its list only shows devices you pair. This
+// module turns the shouts into events, so a program can show a table of everything nearby.
+//
+// The program owns the loop: call `ble_next(timeout)` again and again. It waits at most `timeout`
+// milliseconds and returns ONE event (`BleTick` when nothing was heard), so a program can also watch
+// other things between calls (a ui panel, for example) — give each source a small timeout. Shouts are
+// buffered by the native code while the program is busy; if there are too many, the oldest are dropped —
+// a busy room shouts the same thing again anyway.
+//
+// Nothing is paired. `ble_scan_start(active)`: passive (false) only listens — the program sends nothing
+// over bluetooth, but many devices keep their name in the "scan response", which a passive listener never
+// hears, so they show up nameless. Active (true) asks for names (the radio sends scan requests — the
+// laptop's address becomes visible to nearby devices for as long as the scan runs). The program chooses.
+//
+//   fn main() uses ble, ui {
+//     if not ble_scan_start(true) { trap("no bluetooth adapter, or it is switched off") }
+//     while true {
+//       let ev = ble_next(50)
+//       match ev {
+//         BleAdv(mac, rssi, name, services, manuf) => { ...one shout: add it to the table... }
+//         BleOff => { ...the radio went away. Advice, not a command: the program decides... }
+//         else => { }
+//       }
+//     }
+//   }
+//
+// `rssi` is signal strength in dBm: -30 = next to you, -90 = far away, 0 = unknown (a device that shouts
+// "+127" or "-200" is lying or foreign; `ble_parse` turns any lie into 0, so the value always fits). The
+// closer to 0, the nearer the device: walk around and watch the number rise — that is how a lost thing is
+// found. `name` is the shouted name, "" when the device does not give one. `services` are the declared
+// abilities as UUIDs ("180f" = battery; a 128-bit UUID that fits the standard base is shortened to its
+// 4 hex digits, one that does not stays 32 hex digits long); `ble_uuid_name` names the known ones.
+// `manuf` is the maker's block as "company:data" in hex ("004c:..." = Apple; "" when there is none — the
+// first block only, data cut to 31 bytes); `ble_manuf` says the company name.
+// A second `ble_scan_start` does not fail: it stops the old scan and starts a new one with its own
+// mode (a restart also drops a stale `BleOff` left by the dead session).
+module ble
+effect ble "listen to Bluetooth Low Energy advertisements of nearby devices (their addresses, names, signal strength); in active mode also send scan requests for names"
+native "ble.h"
+  targets win64
+  links "-lruntimeobject", "-lmincore" on win64
+
+enum BleEv {
+  BleTick                                     // nothing was heard within the wait
+  BleAdv(mac: Text, rssi: Int, name: Text, services: List[Text], manuf: Text)
+  BleOff                                      // the radio went away or was switched off; advice, not a command
+}
+
+extern fn ble_scan_start(active: Bool) -> Bool uses ble   // false = no bluetooth adapter, or it cannot listen
+extern fn ble_scan_stop() uses ble
+extern fn ble_event(timeout: Int) -> Text uses ble        // the raw event; prefer ble_next()
+  need timeout >= 0
+
+// raw forms: "tick" | "off" | "adv\n<MAC AA:BB:CC:DD:EE:FF>\n<rssi>\n<name or ->\n<services or ->
+//             <company:data or ->
+// canonical: MAC in UPPER-case hex, company/services/uuids in lower-case hex. The native side keeps
+// names single-line (bytes below 0x20 and 0x7F become a space) and cuts manuf data to 31 bytes.
+fn ble_parse(raw: Text) -> BleEv
+  ex ble_parse("tick") == BleTick
+  ex ble_parse("off") == BleOff
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-67\nJBL Flip\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: -67, name: "JBL Flip", services: [], manuf: "")
+  ex ble_parse("adv\n01:02:03:04:05:06\n-99\nMi Flora\n180f,181a\n004c:ad1001") ==
+    BleAdv(mac: "01:02:03:04:05:06", rssi: -99, name: "Mi Flora", services: ["180f", "181a"], manuf: "004c:ad1001")
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n127\n-\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: 0, name: "", services: [], manuf: "")     // "+127" = a lie or a foreign stack -> unknown
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n1\n-\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: 0, name: "", services: [], manuf: "")    // "+1": strength cannot be positive
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-128\n-\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: -128, name: "", services: [], manuf: "")  // the edge stays: nothing above it is a lie
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-129\n-\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: 0, name: "", services: [], manuf: "")     // one below the edge -> unknown
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-200\n-\n-\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: 0, name: "", services: [], manuf: "")    // "-200" = the same
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-40\n-\n180a\n-") ==
+    BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: -40, name: "", services: ["180a"], manuf: "")
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-67\nJBL") == BleTick                    // too few fields
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\nloud\n-\n-\n-") == BleTick               // strength not a number
+  ex ble_parse("adv\nAA:BB:CC:DD:EE:FF\n-67\nJBL Flip\n180f") == BleTick        // 4 fields, not 5
+  ex ble_parse("adv") == BleTick
+  ex ble_parse("something new") == BleTick
+{
+  if starts_with(raw, "adv\n") {
+    let parts = split(raw, "\n")
+    if len(parts) != 6 {
+      return BleTick
+    }
+    match parse_int(parts[2]) {
+      some(got) => {
+        var rssi = got
+        if rssi > 0 or rssi < -128 {
+          rssi = 0                    // a lie (or a foreign stack): +127 means "unknown" there
+        }
+        var name = parts[3]
+        if name == "-" {
+          name = ""
+        }
+        var services: List[Text] = []
+        if parts[4] != "-" {
+          services = split(parts[4], ",")
+        }
+        var manuf = parts[5]
+        if manuf == "-" {
+          manuf = ""
+        }
+        return BleAdv(mac: parts[1], rssi: rssi, name: name, services: services, manuf: manuf)
+      }
+      none => { return BleTick }
+    }
+  }
+  match raw {
+    "off" => { return BleOff }
+    else => { return BleTick }      // unknown or malformed events are ignored: an older program keeps working
+  }
+}
+
+// signal strength -> 5 bars to a 1 bar (0 = unknown)
+fn ble_bar(rssi: Int) -> Text
+  need rssi >= -128 and rssi <= 0
+  ex ble_bar(0) == "?"
+  ex ble_bar(-30) == "▮▮▮▮▮"
+  ex ble_bar(-45) == "▮▮▮▮▮"
+  ex ble_bar(-46) == "▮▮▮▮"
+  ex ble_bar(-60) == "▮▮▮▮"
+  ex ble_bar(-61) == "▮▮▮"
+  ex ble_bar(-75) == "▮▮▮"
+  ex ble_bar(-76) == "▮▮"
+  ex ble_bar(-90) == "▮▮"
+  ex ble_bar(-91) == "▮"
+  ex ble_bar(-127) == "▮"
+{
+  if rssi == 0 {
+    return "?"
+  }
+  if rssi >= -45 {
+    return "▮▮▮▮▮"
+  }
+  if rssi >= -60 {
+    return "▮▮▮▮"
+  }
+  if rssi >= -75 {
+    return "▮▮▮"
+  }
+  if rssi >= -90 {
+    return "▮▮"
+  }
+  return "▮"
+}
+
+// "company:data" -> who the company is (the id itself when unknown, "" when there is no block)
+fn ble_manuf(manuf: Text) -> Text
+  ex ble_manuf("") == ""
+  ex ble_manuf("004c:4c0410") == "Apple"
+  ex ble_manuf("0006:10") == "Microsoft"
+  ex ble_manuf("038f:20aa01") == "Xiaomi"
+  ex ble_manuf("0075:4201") == "Samsung"
+  ex ble_manuf("0087:013f") == "Garmin"
+  ex ble_manuf("0059:401122") == "Nordic Semiconductor"
+  ex ble_manuf("00e0:0102") == "Google"
+  ex ble_manuf("0171:cafe") == "Amazon"
+  ex ble_manuf("02e5:0e") == "Espressif"
+  ex ble_manuf("ffff:00") == "ffff"
+  ex ble_manuf("004c") == "Apple"      // no ":" — the id alone still names itself
+  ex ble_manuf("ffff") == "ffff"
+{
+  if manuf == "" {
+    return ""
+  }
+  var id = manuf
+  match find(manuf, ":") {
+    some(i) => { id = slice(manuf, 0, i) }
+    none => { }
+  }
+  match id {
+    "004c" => { return "Apple" }
+    "0006" => { return "Microsoft" }
+    "0075" => { return "Samsung" }
+    "0087" => { return "Garmin" }
+    "0059" => { return "Nordic Semiconductor" }
+    "00e0" => { return "Google" }
+    "0171" => { return "Amazon" }
+    "02e5" => { return "Espressif" }
+    "038f" => { return "Xiaomi" }
+    else => { return id }
+  }
+}
+
+// short service UUID -> what the device says it can do (the id itself when unknown)
+fn ble_uuid_name(u: Text) -> Text
+  ex ble_uuid_name("180f") == "battery"
+  ex ble_uuid_name("180d") == "heart rate"
+  ex ble_uuid_name("1809") == "thermometer"
+  ex ble_uuid_name("181a") == "environment sensor"
+  ex ble_uuid_name("180a") == "device info"
+  ex ble_uuid_name("fd6f") == "exposure notification"
+  ex ble_uuid_name("181c") == "181c"
+{
+  match u {
+    "180f" => { return "battery" }
+    "180d" => { return "heart rate" }
+    "1809" => { return "thermometer" }
+    "181a" => { return "environment sensor" }
+    "180a" => { return "device info" }
+    "fd6f" => { return "exposure notification" }
+    else => { return u }
+  }
+}
+
+fn ble_next(timeout: Int) -> BleEv uses ble {
+  return ble_parse(ble_event(timeout))
+}

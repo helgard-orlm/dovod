@@ -1,0 +1,308 @@
+// BLE-сканер — кто светит вокруг. Таблица на ui-модуле, крики устройств на ble-модуле.
+// Запуск из исходников:  dovod run scan.dv              (нужен блютус; на Linux модуль ловится ловушкой)
+// Сборка для Windows:    dovod build scan.dv --target win64 -o build/BleScan.exe
+//
+// Экран — чистая функция `view`; каждый клик и каждый крик устройства — чистые `upd_ui` / `upd_ble`.
+// `main` только носит события внутрь, деревья наружу и исполняет команды ("scan_on", "quit", ...).
+use ui
+use ble
+
+record Dev { mac: Text, rssi: Int, name: Text, services: Text, company: Text }
+record Model { devs: List[Dev], active: Bool, on: Bool, heard: Int, msg: Text }
+record Step { m: Model, cmds: List[Text] }
+
+fn start() -> Model
+  ex len(start().devs) == 0
+  ex start().active == true
+  ex start().on == true
+  ex start().heard == 0
+  ex start().msg == "слушаю активно"
+{
+  return Model(devs: [], active: true, on: true, heard: 0, msg: "слушаю активно")
+}
+
+// один крик -> таблица: новый адрес добавляется, знакомый обновляется
+fn upsert(ds: List[Dev], d: Dev) -> List[Dev]
+  ex upsert([], Dev(mac: "AA", rssi: -50, name: "n", services: "", company: "")) ==
+    [Dev(mac: "AA", rssi: -50, name: "n", services: "", company: "")]
+  ex upsert([Dev(mac: "AA", rssi: -50, name: "старый", services: "", company: "")],
+            Dev(mac: "AA", rssi: -70, name: "новый", services: "180f", company: "Apple")) ==
+    [Dev(mac: "AA", rssi: -70, name: "новый", services: "180f", company: "Apple")]
+  ex upsert([Dev(mac: "AA", rssi: -50, name: "a", services: "", company: "")],
+            Dev(mac: "BB", rssi: -60, name: "b", services: "", company: "")) ==
+    [Dev(mac: "AA", rssi: -50, name: "a", services: "", company: ""),
+     Dev(mac: "BB", rssi: -60, name: "b", services: "", company: "")]
+{
+  var out: List[Dev] = []
+  var hit = false
+  for i in 0..len(ds) {
+    if ds[i].mac == d.mac {
+      hit = true
+      out.push(d)
+    } else {
+      out.push(ds[i])
+    }
+  }
+  if not hit {
+    out.push(d)
+  }
+  return out
+}
+
+// громче (ближе к 0) — выше; при равных сохраняем порядок прихода
+fn top(ds: List[Dev]) -> List[Dev]
+  ex top([]) == []
+  ex top([Dev(mac: "A", rssi: -90, name: "", services: "", company: ""),
+          Dev(mac: "B", rssi: -40, name: "", services: "", company: "")]) ==
+    [Dev(mac: "B", rssi: -40, name: "", services: "", company: ""),
+     Dev(mac: "A", rssi: -90, name: "", services: "", company: "")]
+  ex top([Dev(mac: "A", rssi: -40, name: "", services: "", company: ""),
+          Dev(mac: "B", rssi: -40, name: "", services: "", company: "")]) ==
+    [Dev(mac: "A", rssi: -40, name: "", services: "", company: ""),
+     Dev(mac: "B", rssi: -40, name: "", services: "", company: "")]
+{
+  var src: List[Dev] = []
+  for i in 0..len(ds) {
+    src.push(ds[i])
+  }
+  var out: List[Dev] = []
+  while len(src) > 0 {
+    var best = 0
+    for i in 1..len(src) {
+      if src[i].rssi > src[best].rssi {
+        best = i
+      }
+    }
+    out.push(src[best])
+    src = slice(src, 0, best) + slice(src, best + 1, len(src))
+  }
+  return out
+}
+
+// тёмная тема страницы
+fn theme() -> Text
+  ex theme() == "<style>body{background:#101214;color:#d8dde3;margin:16px;font-family:system-ui}h1{font-size:18px}table{border-collapse:collapse}td{padding:3px 14px 3px 0;border-bottom:1px solid #262b31}button{margin-right:8px}input{margin-right:4px}</style>"
+{
+  return "<style>body{background:#101214;color:#d8dde3;margin:16px;font-family:system-ui}h1{font-size:18px}table{border-collapse:collapse}td{padding:3px 14px 3px 0;border-bottom:1px solid #262b31}button{margin-right:8px}input{margin-right:4px}</style>"
+}
+
+// строки таблицы: по одному ряду на устройство, сверху самый громкий
+fn table_rows(ds: List[Dev]) -> List[UiNode]
+  ex table_rows([]) == []
+  ex table_rows([Dev(mac: "AA:BB:CC:DD:EE:FF", rssi: -50, name: "часы", services: "180f", company: "Apple")]) ==
+    [UiRow(kids: [UiText(text: "▮▮▮▮ -50"),
+                  UiText(text: "часы"),
+                  UiText(text: "AA:BB:CC:DD:EE:FF"),
+                  UiText(text: "180f"),
+                  UiText(text: "Apple")])]
+{
+  var out: List[UiNode] = []
+  for d in top(ds) {
+    out.push(UiRow(kids: [
+      UiText(text: ble_bar(d.rssi) + " " + show(d.rssi)),
+      UiText(text: d.name),
+      UiText(text: d.mac),
+      UiText(text: d.services),
+      UiText(text: d.company),
+    ]))
+  }
+  return out
+}
+
+fn go_label(m: Model) -> Text
+  ex go_label(start()) == "⏸ пауза"
+  ex go_label(start() with { on: false }) == "▶ слушать"
+{
+  if m.on {
+    return "⏸ пауза"
+  }
+  return "▶ слушать"
+}
+
+fn listen_msg(active: Bool) -> Text
+  ex listen_msg(true) == "слушаю активно"
+  ex listen_msg(false) == "слушаю пассивно"
+{
+  if active {
+    return "слушаю активно"
+  }
+  return "слушаю пассивно"
+}
+
+fn view(m: Model) -> UiNode
+  ex view(start()) == UiCol(kids: [
+    UiHtml(html: theme()),
+    UiHeading(text: "BLE-сканер · криков: 0 · устройств: 0"),
+    UiRow(kids: [
+      UiCheck(id: "mode", arg: 0, label: "актив — спрашивать имена", on: true),
+      UiButton(id: "go", arg: 0, label: "⏸ пауза"),
+      UiButton(id: "clear", arg: 0, label: "Очистить"),
+      UiButton(id: "exit", arg: 0, label: "Выход"),
+    ]),
+    UiText(text: "слушаю активно"),
+    UiTable(head: ["Сигнал", "Имя", "MAC", "Сервисы", "Кто"], rows: []),
+  ])
+{
+  return UiCol(kids: [
+    UiHtml(html: theme()),
+    UiHeading(text: "BLE-сканер · криков: " + show(m.heard) + " · устройств: " + show(len(m.devs))),
+    UiRow(kids: [
+      UiCheck(id: "mode", arg: 0, label: "актив — спрашивать имена", on: m.active),
+      UiButton(id: "go", arg: 0, label: go_label(m)),
+      UiButton(id: "clear", arg: 0, label: "Очистить"),
+      UiButton(id: "exit", arg: 0, label: "Выход"),
+    ]),
+    UiText(text: m.msg),
+    UiTable(head: ["Сигнал", "Имя", "MAC", "Сервисы", "Кто"], rows: table_rows(m.devs)),
+  ])
+}
+
+// клик по панели -> новая модель + команды для main
+fn upd_ui(m: Model, ev: UiEv) -> Step
+  ex upd_ui(start(), UiTick) == Step(m: start(), cmds: [])
+  ex upd_ui(start(), UiOpened) == Step(m: start(), cmds: [])
+  ex upd_ui(start(), UiClosed) == Step(m: start(), cmds: [])
+  ex upd_ui(start(), UiClick(id: "clear", arg: 0)) == Step(m: start() with { devs: [], heard: 0 }, cmds: [])
+  ex upd_ui(start(), UiClick(id: "go", arg: 0)) ==
+    Step(m: start() with { on: false, msg: "пауза" }, cmds: ["scan_off"])
+  ex upd_ui(start() with { on: false, msg: "пауза" }, UiClick(id: "go", arg: 0)) ==
+    Step(m: start() with { msg: "слушаю активно" }, cmds: ["scan_on"])
+  ex upd_ui(start() with { active: false, msg: "слушаю пассивно" }, UiClick(id: "go", arg: 0)) ==
+    Step(m: start() with { active: false, on: false, msg: "пауза" }, cmds: ["scan_off"])
+  ex upd_ui(start() with { active: false, on: false, msg: "пауза" }, UiClick(id: "go", arg: 0)) ==
+    Step(m: start() with { active: false, msg: "слушаю пассивно" }, cmds: ["scan_on"])
+  ex upd_ui(start(), UiClick(id: "exit", arg: 0)) == Step(m: start(), cmds: ["quit"])
+  ex upd_ui(start(), UiClick(id: "zzz", arg: 0)) == Step(m: start(), cmds: [])
+  ex upd_ui(start(), UiChange(id: "mode", arg: 0, value: "false")) ==
+    Step(m: start() with { active: false, msg: "слушаю пассивно" }, cmds: ["scan_restart"])
+  ex upd_ui(start() with { on: false, msg: "пауза" }, UiChange(id: "mode", arg: 0, value: "true")) ==
+    Step(m: start() with { on: false, msg: "пауза" }, cmds: [])
+  ex upd_ui(start() with { active: false, on: false, msg: "пауза" }, UiChange(id: "mode", arg: 0, value: "true")) ==
+    Step(m: start() with { on: false, msg: "пауза" }, cmds: [])
+  ex upd_ui(start() with { active: true, on: false, msg: "пауза" }, UiChange(id: "mode", arg: 0, value: "false")) ==
+    Step(m: start() with { active: false, on: false, msg: "пауза" }, cmds: [])
+  ex upd_ui(start(), UiChange(id: "zzz", arg: 0, value: "x")) == Step(m: start(), cmds: [])
+{
+  match ev {
+    UiTick => { return Step(m: m, cmds: []) }
+    UiOpened => { return Step(m: m, cmds: []) }
+    UiClosed => { return Step(m: m, cmds: []) }
+    UiClick(id) => {
+      if id == "clear" {
+        return Step(m: m with { devs: [], heard: 0 }, cmds: [])
+      }
+      if id == "go" {
+        if m.on {
+          return Step(m: m with { on: false, msg: "пауза" }, cmds: ["scan_off"])
+        }
+        return Step(m: m with { on: true, msg: listen_msg(m.active) }, cmds: ["scan_on"])
+      }
+      if id == "exit" {
+        return Step(m: m, cmds: ["quit"])
+      }
+      return Step(m: m, cmds: [])
+    }
+    UiChange(id, value) => {
+      if id == "mode" {
+        if value == "true" or value == "false" {
+          var active = m.active
+          if value == "true" {
+            active = true
+          } else {
+            active = false
+          }
+          if m.on {
+            return Step(m: m with { active: active, msg: listen_msg(active) }, cmds: ["scan_restart"])
+          }
+          return Step(m: m with { active: active }, cmds: [])
+        }
+        return Step(m: m, cmds: [])
+      }
+      return Step(m: m, cmds: [])
+    }
+  }
+}
+
+// один крик устройства или тишина -> новая модель (без команд: native-стороной всё уже случилось)
+fn upd_ble(m: Model, ev: BleEv) -> Model
+  ex upd_ble(start(), BleTick) == start()
+  ex upd_ble(start(), BleOff) == start() with { on: false, msg: "радио пропало" }
+  ex upd_ble(start(), BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: -67, name: "JBL Flip", services: ["180f", "180a"], manuf: "004c:ad10")) ==
+    start() with { devs: [Dev(mac: "AA:BB:CC:DD:EE:FF", rssi: -67, name: "JBL Flip", services: "180f,180a", company: "Apple")], heard: 1 }
+  ex upd_ble(start(), BleAdv(mac: "AA:BB:CC:DD:EE:FF", rssi: -67, name: "", services: [], manuf: "")) ==
+    start() with { devs: [Dev(mac: "AA:BB:CC:DD:EE:FF", rssi: -67, name: "(без имени)", services: "—", company: "")], heard: 1 }
+  ex upd_ble(start(), BleAdv(mac: "A", rssi: -67, name: "x", services: ["180f"], manuf: "")) ==
+    start() with { devs: [Dev(mac: "A", rssi: -67, name: "x", services: "180f", company: "")], heard: 1 }
+{
+  match ev {
+    BleTick => { return m }
+    BleOff => { return m with { on: false, msg: "радио пропало" } }
+    BleAdv(mac, rssi, name, services, manuf) => {
+      var nm = name
+      if nm == "" {
+        nm = "(без имени)"
+      }
+      var svc = join(services, ",")
+      if svc == "" {
+        svc = "—"
+      }
+      return m with {
+        devs: upsert(m.devs, Dev(mac: mac, rssi: rssi, name: nm, services: svc, company: ble_manuf(manuf))),
+        heard: m.heard + 1,
+      }
+    }
+  }
+}
+
+fn main() uses io, ui, ble {
+  match ui_listen(0, false) {
+    none => { trap("панель: не удалось открыть порт") }
+    some(port) => { print("Панель: http://127.0.0.1:" + show(port) + "/") }
+  }
+  ui_window("BLE-сканер — кто светит вокруг")
+  var m = start()
+  var alive = true
+  if not ble_scan_start(m.active) {
+    m = m with { on: false, msg: "нет блютуса — включи адаптер и нажми ▶" }
+  }
+  ui_show(view(m))
+  while alive {
+    var dirty = false
+    let uev = ui_next()
+    if uev == UiClosed {
+      break
+    }
+    if uev != UiTick and uev != UiOpened {
+      dirty = true
+      let s = upd_ui(m, uev)
+      m = s.m
+      for c in s.cmds {
+        if c == "quit" {
+          alive = false
+        }
+        if c == "scan_on" or c == "scan_restart" {
+          ble_scan_stop()
+          if ble_scan_start(m.active) {
+            m = m with { on: true, msg: listen_msg(m.active) }
+          } else {
+            m = m with { on: false, msg: "нет блютуса — включи адаптер и нажми ▶" }
+          }
+        }
+        if c == "scan_off" {
+          ble_scan_stop()
+        }
+      }
+    }
+    if m.on {
+      let bev = ble_next(70)
+      if bev != BleTick {
+        dirty = true
+        m = upd_ble(m, bev)
+      }
+    }
+    if dirty {
+      ui_show(view(m))
+    }
+  }
+  ble_scan_stop()
+}

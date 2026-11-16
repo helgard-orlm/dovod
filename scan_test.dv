@@ -1,0 +1,25 @@
+use ble
+
+// smoke: 10 seconds of shouts on the console, then stop
+fn main() uses io, ble, clock {
+  if not ble_scan_start(true) {
+    print("no bluetooth adapter, or it is switched off")
+    return
+  }
+  print("listening (active)...")
+  var heard = 0
+  let start = now_ms()
+  while now_ms() - start < 10000 {
+    let ev = ble_next(100)
+    match ev {
+      BleAdv(mac, rssi, name, services, manuf) => {
+        heard = heard + 1
+        print(mac + "  " + ble_bar(rssi) + "  " + name + "  " + join(services, ",") + "  " + ble_manuf(manuf))
+      }
+      BleOff => { print("the radio went away") }
+      BleTick => { }
+    }
+  }
+  ble_scan_stop()
+  print(show(heard) + " shouts in 10 s")
+}
