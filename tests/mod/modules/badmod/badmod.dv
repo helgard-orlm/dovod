@@ -1,0 +1,5 @@
+module badmod
+effect badmod "x"
+record Thing { n: Int }
+extern fn badmod_take(t: Thing) -> List[Int] uses badmod
+extern fn other_name() uses badmod

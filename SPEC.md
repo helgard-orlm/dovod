@@ -1,4 +1,4 @@
-# Dovod 0.2 — the whole language
+# Dovod 0.3 — the whole language
 
 Dovod ("довод": an argument, a piece of evidence) is a small compiled language designed for AI
 agents to write and for humans to trust. This file is the complete specification; read it once and
@@ -20,6 +20,7 @@ you can write Dovod. Files end in `.dv`. The compiler emits C and builds a nativ
 
 ```
 use "other.dv"                       // include another file's items (path relative to this file)
+use video                            // bring in a module (see Modules)
 const pi: Float = 3.14159            // constants: literal Int, Float, Bool or Text only
 
 record Point { x: Float, y: Float }
@@ -121,9 +122,19 @@ leave it when the change cannot matter (`max(ms, 0)` vs `max(ms, 1)` before `/ 1
 information, not an error — but compare whole values (`ex f(x) == Rec(...)` or `== base() with { n: 2 }`)
 rather than one field, and try the boundaries; that is what raises it.
 
-Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand` · `video` (a window that plays media; Windows).
-There is no other way to reach the outside world, so the effects of `main` are the whole truth
-about what a program can do.
+Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand`, plus the
+effects of the modules a program `use`s. There is no other way to reach the outside world, so the
+effects of `main` are the whole truth about what a program can do.
+
+## Modules
+
+This page is the core and it stays this size. Everything task-specific (a window, a device, a
+network) lives in a **module**: `use NAME` at the top, then call its functions. A module adds names —
+never syntax, never rules. All its functions and constants start with `name_`, its types and variants
+with `Name`, and nothing else may start that way, so every name shows where it comes from.
+`dovod modules` lists the modules; **`dovod spec NAME` prints a module's page — read it before using
+the module**; `dovod spec modules` explains how to write one (native code behind `extern fn`).
+A module's native code is outside the evidence; `trust` says how much of it there is.
 
 ## Statements
 
@@ -216,21 +227,7 @@ args() -> List[Text]                 uses env
 now_ms() -> Int                      uses clock
 rand_int(lo, hi) -> Int              uses rand      // inclusive
 
-video_open(path) -> Bool             uses video     // play a file in the window (made on first use)
-video_pick() -> Opt[Text]            uses video     // "Open file" dialog; none if cancelled
-video_event() -> Text                uses video     // waits ≤100 ms, returns ONE event (below)
-video_pause(Bool)  video_seek(ms)  video_volume(0..100)  video_mute(Bool)
-video_rate(25..400 percent)  video_fullscreen(Bool)       uses video
-video_pos() -> Int   video_len() -> Int                    uses video     // ms; 0 if unknown
-video_status(Text)  video_title(Text)                      uses video     // status strip, window title
 ```
-`video` events: `tick` (nothing happened) · `key:NAME` (`SPACE LEFT RIGHT UP DOWN PGUP PGDN HOME END
-ESC ENTER BACKSPACE F1..F12 [ ] + - , .`, letters `A`–`Z`, digits; `ctrl+`/`shift+` in front) ·
-`click` · `dblclick` · `wheel:up` · `wheel:down` · `drop:PATH` (several paths joined by `\n`) · `loaded` ·
-`ended` · `closed` (window close button) · `error:MESSAGE`. Unknown events may be added later: ignore them.
-`video` works in a Windows build (`dovod build FILE --target win64|win32`; playback by Media
-Foundation, part of Windows, so the .exe needs no DLLs). Elsewhere its calls trap; pure code still checks.
-
 ## Tools
 
 ```
@@ -244,6 +241,7 @@ dovod weak FILE             every small change to the code that no example notic
 dovod card FILE             interface only: signatures, contracts, two examples each — hand this to
                             another agent instead of the source
 dovod spec                  this file
+dovod modules               the modules; `dovod spec NAME` — a module's page; `dovod spec modules` — writing one
 ```
 
 Workflow for an agent: write the signature and the examples first, put `?todo` in the body, run
@@ -261,4 +259,4 @@ counted in the ledger's "rests on assumed".
 Runtime traps (the complete list): failed `need`/`give` · Int overflow (`+ - *`, unary `-`, `abs`) ·
 division by zero (`/`, `%`; Int and Float) · index/slice out of range (`xs[i]`, `byte`, `slice`) ·
 `pop` on an empty list · `trunc` of a Float outside Int range · `from_byte` outside 0..255 ·
-`split`/`replace` with an empty pattern · `rand_int` with lo > hi · `video_volume`/`video_rate` out of range · `video` outside Windows · out of memory · `trap(...)`.
+`split`/`replace` with an empty pattern · `rand_int` with lo > hi · a module's native function on a target it has no code for · out of memory · `trap(...)`.

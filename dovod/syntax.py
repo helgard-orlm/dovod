@@ -41,6 +41,7 @@ KEYWORDS = {
     'fn', 'record', 'enum', 'const', 'use', 'let', 'var', 'if', 'else', 'while', 'for', 'in',
     'match', 'return', 'break', 'continue', 'and', 'or', 'not', 'true', 'false', 'none', 'some',
     'uses', 'need', 'give', 'ex', 'assume', 'with',
+    'module', 'effect', 'native', 'extern',
 }
 
 TOK_RE = re.compile(r'''
@@ -183,7 +184,8 @@ class Parser:
         self.skip_nl()
         while not self.at('eof'):
             tok = self.peek()
-            if tok.kind != 'kw' or tok.val not in ('fn', 'record', 'enum', 'const', 'use'):
+            if tok.kind != 'kw' or tok.val not in ('fn', 'record', 'enum', 'const', 'use', 'module', 'effect',
+                                                   'native', 'extern'):
                 self.fail("expected a top-level item: fn, record, enum, const or use")
             items.append(getattr(self, 'p_' + tok.val)())
             self.skip_nl()
@@ -191,8 +193,46 @@ class Parser:
 
     def p_use(self):
         at = self.next()
-        path = self.expect('str').val
-        return Node('Use', at, path=path)
+        if self.at('id'):                       # `use video` — a module
+            return Node('Use', at, path=None, module=self.next().val)
+        path = self.expect('str').val           # `use "file.dv"` — a file
+        return Node('Use', at, path=path, module=None)
+
+    # -- module files only
+    def p_module(self):
+        at = self.next()
+        return Node('Module', at, name=self.expect('id').val)
+
+    def p_effect(self):
+        at = self.next()
+        name = self.expect('id').val
+        return Node('Effect', at, name=name, doc=self.expect('str').val)
+
+    def p_native(self):
+        at = self.next()
+        n = Node('Native', at, path=self.expect('str').val, targets=[], links=[], gui=False)
+        while True:
+            self.skip_nl()
+            tok = self.peek()
+            if tok.kind != 'id' or tok.val not in ('targets', 'links', 'gui'):
+                return n
+            self.next()
+            if tok.val == 'gui':
+                n.gui = True
+            elif tok.val == 'targets':
+                n.targets.append(self.expect('id').val)
+                while self.accept('op', ','):
+                    n.targets.append(self.expect('id').val)
+            else:
+                n.links.append(self.expect('str').val)
+                while self.accept('op', ','):
+                    n.links.append(self.expect('str').val)
+
+    def p_extern(self):
+        self.next()
+        if not self.at('kw', 'fn'):
+            self.fail("expected `fn` after `extern`")
+        return self.p_fn(extern=True)
 
     def p_fields(self, close):
         """name: Type, separated by ',' and/or newlines, until `close`."""
@@ -252,7 +292,7 @@ class Parser:
     def clause_text(self, start_tok):
         return self.src[start_tok.pos:self.peek().pos].strip()
 
-    def p_fn(self):
+    def p_fn(self, extern=False):
         at = self.next()
         name = self.expect('id').val
         self.expect('op', '(')
@@ -291,10 +331,16 @@ class Parser:
         if self.at('op', '->'):
             self.fail("the return type goes right after the parameters, before `uses` and the clauses",
                       f"write `fn {name}(...) -> Type uses ...`")
-        body = self.p_block()
+        if extern:
+            if self.at('op', '{'):
+                self.fail("an `extern fn` has no body: its code is the module's native file")
+            body = []
+        else:
+            body = self.p_block()
         end_line = self.t[self.i - 1].line
         return Node('Fn', at, name=name, params=params, ret=ret, uses=uses, needs=needs, gives=gives,
-                    exs=exs, assume=assume, body=body, sig=sig, end_line=end_line)
+                    exs=exs, assume=assume, body=body, sig=('extern ' if extern else '') + sig, end_line=end_line,
+                    extern=extern)
 
     # -- statements
     def p_block(self):

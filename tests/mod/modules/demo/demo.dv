@@ -1,0 +1,28 @@
+// Module `demo`: a test module with native code for every target.
+module demo
+effect demo "talk to the demo device"
+native "demo.h"
+
+record DemoReading { id: Int, label: Text }
+
+extern fn demo_twice(n: Int) -> Int uses demo
+extern fn demo_shout(t: Text) -> Text uses demo           // borrowed in, owned out
+extern fn demo_find(t: Text) -> Opt[Text] uses demo
+extern fn demo_words() -> List[Text] uses demo
+extern fn demo_level(pct: Int) -> Int uses demo
+  need pct >= 0 and pct <= 100
+extern fn demo_hypot(a: Float, b: Float) -> Float          // pure native code: always "assumed"
+
+fn demo_parse(raw: Text) -> DemoReading
+  ex demo_parse("7:temp") == DemoReading(id: 7, label: "temp")
+  ex demo_parse("junk") == DemoReading(id: -1, label: "junk")
+{
+  match find(raw, ":") {
+    some(i) => { return DemoReading(id: or_else(parse_int(slice(raw, 0, i)), -1), label: slice(raw, i + 1, len(raw))) }
+    none => { return DemoReading(id: -1, label: raw) }
+  }
+}
+
+fn demo_read() -> DemoReading uses demo {
+  return demo_parse(demo_shout("7:temp"))
+}

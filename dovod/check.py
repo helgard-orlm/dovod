@@ -4,11 +4,10 @@ from .syntax import Diag
 
 ERR = '?'
 SCALARS = ('Int', 'Float', 'Bool', 'Text')
-EFFECTS = ('io', 'fs_read', 'fs_write', 'env', 'clock', 'rand', 'video')
+EFFECTS = ('io', 'fs_read', 'fs_write', 'env', 'clock', 'rand')   # the core; modules add their own
 EFFECT_DOC = {
     'io': 'read/write the console', 'fs_read': 'read files', 'fs_write': 'write files',
     'env': 'read command-line arguments', 'clock': 'read the clock', 'rand': 'use randomness',
-    'video': 'open a window and play media files (Windows)',
 }
 OI, OF, OT, LT = ('Opt', 'Int'), ('Opt', 'Float'), ('Opt', 'Text'), ('List', 'Text')
 
@@ -38,19 +37,6 @@ BUILTINS = {
     'args': ([], LT, 'env'),
     'now_ms': ([], 'Int', 'clock'),
     'rand_int': (['Int', 'Int'], 'Int', 'rand'),
-    'video_open': (['Text'], 'Bool', 'video'),
-    'video_pick': ([], OT, 'video'),
-    'video_event': ([], 'Text', 'video'),
-    'video_pause': (['Bool'], 'Void', 'video'),
-    'video_seek': (['Int'], 'Void', 'video'),
-    'video_pos': ([], 'Int', 'video'),
-    'video_len': ([], 'Int', 'video'),
-    'video_volume': (['Int'], 'Void', 'video'),
-    'video_mute': (['Bool'], 'Void', 'video'),
-    'video_rate': (['Int'], 'Void', 'video'),
-    'video_fullscreen': (['Bool'], 'Void', 'video'),
-    'video_status': (['Text'], 'Void', 'video'),
-    'video_title': (['Text'], 'Void', 'video'),
 }
 POLY = ('len', 'show', 'slice', 'or_else', 'abs', 'min', 'max')
 
@@ -157,8 +143,18 @@ def calls_fn(e, name):
 
 
 class Checker:
-    def __init__(self, items):
+    def __init__(self, items, modules=None):
         self.items = items
+        self.modules = modules or {}
+        self.effects = list(EFFECTS)
+        self.effect_doc = dict(EFFECT_DOC)
+        self.effect_module = {}
+        for mname, m in self.modules.items():
+            for en, doc in m['effects'].items():
+                if en not in self.effects:
+                    self.effects.append(en)
+                self.effect_doc[en] = doc
+                self.effect_module[en] = mname
         self.errs = []
         self.records, self.enums, self.variants, self.consts, self.fns = {}, {}, {}, {}, {}
         self.type_nodes = {}
@@ -177,7 +173,36 @@ class Checker:
         return m[0] if m else None
 
     # -- driver
+    def owner_ok(self, it, name, is_type):
+        """Names instead of namespaces: what a module exports starts with the module's name
+        (`video_open`, `VideoKey`); nothing else may start that way."""
+        def has(prefix_of):
+            return name.startswith(prefix_of.capitalize()) if is_type else \
+                (name == prefix_of or name.startswith(prefix_of + '_'))
+        mod = getattr(it, 'module', None)
+        if mod:
+            if not has(mod):
+                want = mod.capitalize() + name if is_type else mod + '_' + name
+                self.err('E-MODULE', it, f"module `{mod}` must name this `{want}`: everything a module exports starts with its name",
+                         "that is how a reader knows where a name comes from — Dovod has no namespaces")
+        else:
+            for m in self.modules:
+                if has(m):
+                    self.err('E-MODULE', it, f"the name `{name}` looks like it belongs to module `{m}`",
+                             f"names starting with `{m.capitalize() if is_type else m + '_'}` are reserved for that module; pick another")
+
     def run(self):
+        for it in self.items:
+            if it.k == 'Effect' and it.name in EFFECTS:
+                self.err('E-MODULE', it, f"`{it.name}` is a core effect; a module declares its own")
+            if it.k in ('Record', 'Enum'):
+                self.owner_ok(it, it.name, True)
+                if it.k == 'Enum':
+                    for v, _, vt in it.variants:
+                        vt2 = type('N', (), {'file': vt.file, 'line': vt.line, 'col': vt.col, 'module': it.module})
+                        self.owner_ok(vt2, v, True)
+            elif it.k in ('Fn', 'Const') and it.name != 'main':
+                self.owner_ok(it, it.name, False)
         for it in self.items:
             if it.k in ('Record', 'Enum'):
                 if it.name in SCALARS or it.name in ('List', 'Opt', 'Void', 'Never') or it.name in self.type_nodes:
@@ -326,8 +351,9 @@ class Checker:
         n = f.node
         self.cur = f
         for u, un in n.uses:
-            if u not in EFFECTS:
-                self.err('E-EFFECT', un, f"unknown effect `{u}`", "effects: " + ', '.join(EFFECTS))
+            if u not in self.effects:
+                self.err('E-EFFECT', un, f"unknown effect `{u}`", "effects: " + ', '.join(self.effects)
+                         + " (a module's effect needs `use MODULE` at the top)")
         if len(set(f.uses)) != len(f.uses):
             self.err('E-EFFECT', n, "duplicate effect in `uses`")
         self.scopes = []
@@ -341,8 +367,11 @@ class Checker:
         for e in n.needs:
             self.clause(e, 'need')
         self.loop_depth = 0
-        self.block(n.body, new_scope=True)
-        if f.ret != 'Void' and not self.returns(n.body):
+        if n.extern:
+            self.check_extern(f)
+        else:
+            self.block(n.body, new_scope=True)
+        if not n.extern and f.ret != 'Void' and not self.returns(n.body):
             self.err('E-RETURN', n, f"function `{f.name}` can reach its end without returning {tystr(f.ret)}",
                      "add a `return` on every path (or `trap(\"...\")` where it cannot happen)")
         if n.gives:
@@ -362,10 +391,10 @@ class Checker:
         for eff, node in f.used_effects.items():
             if eff not in f.uses:
                 have = ', '.join(f.uses + [eff])
-                self.err('E-EFFECT', node, f"`{f.name}` does `{eff}` ({EFFECT_DOC[eff]}) but does not declare it",
+                self.err('E-EFFECT', node, f"`{f.name}` does `{eff}` ({self.effect_doc[eff]}) but does not declare it",
                          f"add `uses {have}` to `fn {f.name}` — or move this out of a pure function")
         for u, un in n.uses:
-            if u in EFFECTS and u not in f.used_effects:
+            if u in self.effects and u not in f.used_effects and not n.extern:
                 self.err('E-EFFECT', un, f"`{f.name}` declares `uses {u}` but never does it",
                          f"remove `{u}` from `uses`")
         # evidence
@@ -397,6 +426,27 @@ class Checker:
                          f"`{f.name}` has effects, so examples cannot run at check time",
                          "move the logic into a pure function with examples; keep this one a thin shell")
         self.cur = None
+
+    def check_extern(self, f):
+        """An extern fn: its body is native code. Only simple types cross the border."""
+        n = f.node
+        ok = ('Int', 'Float', 'Bool', 'Text', OI, OF, OT, LT)
+        for pn, pt, node in n.params:
+            if pt not in ok:
+                self.err('E-MODULE', node, f"an extern parameter cannot be {tystr(pt)}",
+                         "across the native border go only Int, Float, Bool, Text, Opt[Int|Float|Text], List[Text]; "
+                         "build richer types in Dovod code on top (e.g. serialise to Text)")
+            self.lookup(pn).used = True
+        if f.ret != 'Void' and f.ret not in ok:
+            self.err('E-MODULE', n, f"an extern function cannot return {tystr(f.ret)}",
+                     "return Int, Float, Bool, Text, Opt[Int|Float|Text] or List[Text] and parse it in Dovod")
+        if n.gives:
+            self.err('E-MODULE', n.gives[0], "`give` on an extern would be checked against native code nobody examples",
+                     "wrap the extern in a Dovod function and put the `give` there")
+        if n.exs:
+            self.err('E-EVIDENCE', n.exs[0], "an extern function cannot have examples: its code is not Dovod")
+        if not n.uses and not n.assume:
+            n.assume = ("native code (extern): not checked by Dovod", n)
 
     def clause(self, e, kind):
         self.pure_ctx = kind
@@ -928,7 +978,7 @@ class Checker:
                         self.err('E-ARGS', a, f"this argument is labelled `{an}` but this position of `{name}` is `{pn}`",
                                  f"order: {name}(" + ', '.join(n for n, _ in g.params) + ") — labels check the order, they do not change it")
             for eff in g.uses:
-                if eff in EFFECTS:
+                if eff in self.effects:
                     self.effect(e, eff)
             if not self.pure_ctx:
                 f.calls.add(name)

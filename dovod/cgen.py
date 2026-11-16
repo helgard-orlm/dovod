@@ -23,11 +23,6 @@ SIMPLE = {
     'print': 'dv_print({0})', 'read_line': 'dv_read_line()', 'read_file': 'dv_read_file({0})',
     'write_file': 'dv_write_file({0}, {1})', 'args': 'dv_args()', 'now_ms': 'dv_now_ms()',
     'rand_int': 'dv_rand_int({0}, {1}, {L})',
-    'video_open': 'dv_video_open({0})', 'video_pick': 'dv_video_pick()', 'video_event': 'dv_video_event()',
-    'video_pause': 'dv_video_pause({0})', 'video_seek': 'dv_video_seek({0})', 'video_pos': 'dv_video_pos()',
-    'video_len': 'dv_video_len()', 'video_volume': 'dv_video_volume({0}, {L})', 'video_mute': 'dv_video_mute({0})',
-    'video_rate': 'dv_video_rate({0}, {L})', 'video_fullscreen': 'dv_video_fullscreen({0})',
-    'video_status': 'dv_video_status({0})', 'video_title': 'dv_video_title({0})',
 }
 
 
@@ -63,8 +58,9 @@ class Scope:
 
 
 class CGen:
-    def __init__(self, ck, mode):
-        self.ck, self.mode = ck, mode
+    def __init__(self, ck, mode, target='native'):
+        self.ck, self.mode, self.target = ck, mode, target
+        self.stubs = []          # extern functions whose module has no native code for this target
         self.types = []          # composite (tuple) types in registration order
         self.heap_cache = {}
         self.n = 0
@@ -653,16 +649,39 @@ class CGen:
     def start(self):
         self.buf, self.declbuf, self.scopes = [], [], []
 
+    def native_here(self, mod):
+        m = self.ck.modules[mod]
+        return bool(m['native']) and self.target in m['targets']
+
     def gen_fn(self, f, protos, bodies):
         n = f.node
         self.fn = f
         params = ', '.join(f"{self.cty(t)} v_{p}" for p, t in f.params) or 'void'
         ret = self.cty(f.ret)
-        mutable = self.mode == 'test' and f.ret != 'Void' and not f.uses and f.name != 'main'
-        contract = bool(n.needs or n.gives) or mutable
+        mutable = self.mode == 'test' and f.ret != 'Void' and not f.uses and f.name != 'main' and not n.extern
+        contract = bool(n.needs or n.gives) or mutable or n.extern
         impl = f"F_{f.name}__impl" if contract else f"F_{f.name}"
-        protos.append(f"static {ret} {impl}({params});")
+        if n.extern:
+            # the body is `dv_<name>` in the module's native file: arguments are borrowed, the result is owned
+            impl = f"dv_{f.name}"
+            if not self.native_here(n.module):
+                m = self.ck.modules[n.module]
+                where = ', '.join(m['targets']) if m['native'] else 'no target (the module has no native file)'
+                msg = f"`{f.name}` (module {n.module}) has native code only for: {where}; this build is {self.target}"
+                self.stubs.append(f"static {ret} {impl}({params}) {{ dv_trap({cstr(msg)}, \"runtime\"); }}")
+        else:
+            protos.append(f"static {ret} {impl}({params});")
         self.start()
+        if n.extern:
+            pass
+        else:
+            self.gen_body(f, impl, params, ret, bodies)
+        if not contract:
+            return
+        self.gen_wrapper(f, impl, params, ret, mutable, protos, bodies)
+
+    def gen_body(self, f, impl, params, ret, bodies):
+        n = f.node
         self.emit(f"static {ret} {impl}({params})")
         tail = None if f.ret == 'Void' else f'dv_trap("reached the end of {f.name} without return", {self.loc(n)});'
         self.mut_on = self.mode == 'test' and not f.uses and f.name != 'main' and bool(n.exs)
@@ -670,8 +689,9 @@ class CGen:
         self.block(n.body, 'fn', head=head, cov=self.newcov(n.line, 'fn body', n.body), tail=tail)
         self.mut_on = False
         bodies.extend(self.buf)
-        if not contract:
-            return
+
+    def gen_wrapper(self, f, impl, params, ret, mutable, protos, bodies):
+        n = f.node
         protos.append(f"static {ret} F_{f.name}({params});")
         self.start()
         self.scopes.append(Scope('fn'))
@@ -806,6 +826,7 @@ class CGen:
         types = self.gen_types()
         pre = open(os.path.join(HERE, 'rt_pre.h')).read()
         post = open(os.path.join(HERE, 'rt_post.h')).read()
-        if any('video' in f.uses for f in ck.fns.values()):
-            post += '\n' + open(os.path.join(HERE, 'rt_video.h')).read()
-        return '\n'.join([pre] + covdef + mut + types + [post] + consts + protos + bodies + main) + '\n'
+        for mname, m in ck.modules.items():
+            if self.native_here(mname):
+                post += f'\n// ---- module {mname}: native code\n' + open(m['native'], encoding='utf-8').read()
+        return '\n'.join([pre] + covdef + mut + types + [post] + self.stubs + consts + protos + bodies + main) + '\n'

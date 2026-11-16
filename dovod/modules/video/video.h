@@ -1,6 +1,6 @@
-// Dovod runtime: the `video` effect (a window that plays a media file).
+// Module `video`, native side: a window that plays a media file.
 // Windows only: playback is done by Media Foundation (MFPlay), which ships with Windows 7+,
-// so a Dovod player is one .exe with no DLLs. Elsewhere every call traps with a clear message.
+// so a Dovod player is one .exe with no DLLs. (On other targets the compiler generates trapping stubs.)
 //
 // The program drives a poll loop: `video_event()` pumps the window for up to 100 ms and returns
 // one event as Text: "tick" (nothing happened), "key:<NAME>" (with "ctrl+"/"shift+" before the name),
@@ -342,8 +342,7 @@ static int64_t dv_vtime(int dur) {
 }
 static int64_t dv_video_pos(void) { dv_vinit(); return dv_vtime(0); }
 static int64_t dv_video_len(void) { dv_vinit(); return dv_vtime(1); }
-static void dv_video_volume(int64_t pct, const char* loc) {
-    if (pct < 0 || pct > 100) dv_trap("video_volume: percent not in 0..100", loc);
+static void dv_video_volume(int64_t pct) {
     dv_vinit(); dv_vvol = (float)pct / 100.0f;
     if (dv_vplayer) IMFPMediaPlayer_SetVolume(dv_vplayer, dv_vvol);
 }
@@ -351,8 +350,7 @@ static void dv_video_mute(bool on) {
     dv_vinit(); dv_vmuted = on;
     if (dv_vplayer) IMFPMediaPlayer_SetMute(dv_vplayer, on ? TRUE : FALSE);
 }
-static void dv_video_rate(int64_t pct, const char* loc) {
-    if (pct < 25 || pct > 400) dv_trap("video_rate: percent not in 25..400", loc);
+static void dv_video_rate(int64_t pct) {
     dv_vinit(); dv_vrate = (float)pct / 100.0f;
     if (dv_vplayer && FAILED(IMFPMediaPlayer_SetRate(dv_vplayer, dv_vrate))) dv_vpush("error:this file cannot play at that speed");
 }
@@ -391,20 +389,4 @@ static void dv_video_title(dv_text t) {
     wchar_t* w = dv_wide(t.p, t.n); SetWindowTextW(dv_vwin, w); free(w);
 }
 
-#else  // not Windows: the effect exists so programs type-check and their pure parts run everywhere
-
-#define DV_VNO(name) dv_trap("`" name "` needs a Windows build: dovod build FILE --target win64 (or win32)", "runtime")
-static bool dv_video_open(dv_text p) { (void)p; DV_VNO("video_open"); }
-static O_Text dv_video_pick(void) { DV_VNO("video_pick"); }
-static dv_text dv_video_event(void) { DV_VNO("video_event"); }
-static void dv_video_pause(bool on) { (void)on; DV_VNO("video_pause"); }
-static void dv_video_seek(int64_t ms) { (void)ms; DV_VNO("video_seek"); }
-static int64_t dv_video_pos(void) { DV_VNO("video_pos"); }
-static int64_t dv_video_len(void) { DV_VNO("video_len"); }
-static void dv_video_volume(int64_t p, const char* l) { (void)p; (void)l; DV_VNO("video_volume"); }
-static void dv_video_mute(bool on) { (void)on; DV_VNO("video_mute"); }
-static void dv_video_rate(int64_t p, const char* l) { (void)p; (void)l; DV_VNO("video_rate"); }
-static void dv_video_fullscreen(bool on) { (void)on; DV_VNO("video_fullscreen"); }
-static void dv_video_status(dv_text t) { (void)t; DV_VNO("video_status"); }
-static void dv_video_title(dv_text t) { (void)t; DV_VNO("video_title"); }
 #endif

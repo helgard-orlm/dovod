@@ -1,0 +1,85 @@
+// Module `video`: one window that plays media files (Windows; playback by Media Foundation, so the
+// .exe needs no DLLs). Build with `dovod build FILE --target win64` (or win32).
+//
+// The program owns the loop: call `video_next()` again and again. It waits at most 100 ms and returns
+// ONE event (`VideoTick` when nothing happened), so a program can also watch other things between calls.
+// The window has a status strip (`video_status`) and a bar of buttons; a button arrives as the key it
+// stands for (Open = "O", Prev = "P", -5 s = "LEFT", Play/Pause = "SPACE", +5 s = "RIGHT", Next = "N",
+// Full screen = "F").
+// Key names: SPACE LEFT RIGHT UP DOWN PGUP PGDN HOME END ESC ENTER BACKSPACE F1..F12 [ ] + - , .
+// letters A–Z, digits; "ctrl+" / "shift+" in front.
+// A failed `video_open` is reported later as `VideoFailed`. Positions and lengths are milliseconds.
+module video
+effect video "open a window and play media files (Windows)"
+native "video.h"
+  targets win64, win32
+  links "-lmfplay", "-lmfplat", "-lole32", "-lcomdlg32", "-lgdi32", "-luser32"
+  gui
+
+enum VideoEv {
+  VideoTick                       // nothing happened within 100 ms
+  VideoKey(name: Text)
+  VideoClick
+  VideoDblClick
+  VideoWheel(up: Bool)
+  VideoDrop(paths: List[Text])    // files dropped on the window
+  VideoLoaded                     // the opened file is ready and playing
+  VideoEnded                      // the file played to its end
+  VideoClosed                     // the window's close button
+  VideoFailed(msg: Text)
+}
+
+extern fn video_open(path: Text) -> Bool uses video          // play a file (the window is made on first use)
+extern fn video_pick() -> Opt[Text] uses video               // "Open file" dialog; none if cancelled
+extern fn video_event() -> Text uses video                   // the raw event; prefer video_next()
+extern fn video_pause(on: Bool) uses video
+extern fn video_seek(ms: Int) uses video
+extern fn video_pos() -> Int uses video                      // 0 if unknown
+extern fn video_len() -> Int uses video                      // 0 if unknown
+extern fn video_volume(pct: Int) uses video
+  need pct >= 0 and pct <= 100
+extern fn video_mute(on: Bool) uses video
+extern fn video_rate(pct: Int) uses video                    // speed in percent
+  need pct >= 25 and pct <= 400
+extern fn video_fullscreen(on: Bool) uses video
+extern fn video_status(text: Text) uses video                // the status strip under the picture
+extern fn video_title(text: Text) uses video                 // the window title
+
+fn video_parse(ev: Text) -> VideoEv
+  ex video_parse("tick") == VideoTick
+  ex video_parse("key:shift+LEFT") == VideoKey(name: "shift+LEFT")
+  ex video_parse("click") == VideoClick
+  ex video_parse("dblclick") == VideoDblClick
+  ex video_parse("wheel:up") == VideoWheel(up: true)
+  ex video_parse("wheel:down") == VideoWheel(up: false)
+  ex video_parse("drop:C:\\a.mp4\nC:\\b.mkv") == VideoDrop(paths: ["C:\\a.mp4", "C:\\b.mkv"])
+  ex video_parse("loaded") == VideoLoaded
+  ex video_parse("ended") == VideoEnded
+  ex video_parse("closed") == VideoClosed
+  ex video_parse("error:no decoder") == VideoFailed(msg: "no decoder")
+  ex video_parse("something new") == VideoTick
+{
+  if starts_with(ev, "key:") {
+    return VideoKey(name: slice(ev, 4, len(ev)))
+  }
+  if starts_with(ev, "drop:") {
+    return VideoDrop(paths: split(slice(ev, 5, len(ev)), "\n"))
+  }
+  if starts_with(ev, "error:") {
+    return VideoFailed(msg: slice(ev, 6, len(ev)))
+  }
+  match ev {
+    "wheel:up" => { return VideoWheel(up: true) }
+    "wheel:down" => { return VideoWheel(up: false) }
+    "click" => { return VideoClick }
+    "dblclick" => { return VideoDblClick }
+    "loaded" => { return VideoLoaded }
+    "ended" => { return VideoEnded }
+    "closed" => { return VideoClosed }
+    else => { return VideoTick }   // unknown events are ignored: an older program keeps working
+  }
+}
+
+fn video_next() -> VideoEv uses video {
+  return video_parse(video_event())
+}

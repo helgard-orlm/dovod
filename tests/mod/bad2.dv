@@ -1,0 +1,10 @@
+use demo
+record Thing { n: Int }
+fn quiet(n: Int) -> Int
+  ex quiet(1) == 2
+{
+  return demo_twice(n)
+}
+fn main() uses io {
+  print(show(quiet(1)))
+}

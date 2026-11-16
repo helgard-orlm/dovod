@@ -1,0 +1,7 @@
+use demo
+record DemoThing { n: Int }
+fn demo_extra(n: Int) -> Int
+  ex demo_extra(1) == 1
+{
+  return n
+}

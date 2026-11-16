@@ -1,0 +1,6 @@
+// Module `nonative`: native code only for win64 — elsewhere its calls must trap, pure code must still check.
+module nonative
+effect nonative "poke the nonative device"
+native "nonative.h"
+  targets win64
+extern fn nonative_poke(n: Int) -> Int uses nonative

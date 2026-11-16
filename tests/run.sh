@@ -23,7 +23,20 @@ out=$(bin/dovod weak tests/weak.dv 2>&1)
 echo "$out" | grep -q "W-WEAK: in \`grade\` no example notices if \`>=\` becomes \`>\`" || { echo "FAIL: weak.dv boundary mutant not reported"; fail=1; }
 echo "$out" | grep -q "W-WEAK: in \`tidy\` no example notices if this assignment is removed" || { echo "FAIL: weak.dv removed assignment not reported"; fail=1; }
 echo "$out" | grep -q "in \`spin\`" && { echo "FAIL: weak.dv endless-loop mutant should count as noticed"; fail=1; }
-bin/dovod trust examples/player.dv | grep -q "lines of C over Windows Media Foundation" || { echo "FAIL: ledger does not name the video runtime"; fail=1; }
+bin/dovod trust examples/player.dv | grep -q "module .video.: 13 native function(s), [0-9]* lines of C" || { echo "FAIL: ledger does not name the video runtime"; fail=1; }
+# modules: native code behind `use NAME`, stubs on other targets, names instead of namespaces
+out=$(cd tests/mod && DOVOD_CFLAGS="-fsanitize=address,undefined -g" ../../bin/dovod run prog.dv 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error\|LeakSanitizer" && { echo "FAIL: sanitizer report in tests/mod/prog.dv"; fail=1; }
+echo "$out" | grep -q '42 ABC some("x") none one,two 50 5.0 DemoReading(id: 7, label: "TEMP")' || { echo "FAIL: module demo output"; fail=1; }
+(cd tests/mod && ../../bin/dovod run prog.dv a 2>&1) | grep -q "need failed: pct >= 0 and pct <= 100" || { echo "FAIL: extern need not checked"; fail=1; }
+(cd tests/mod && ../../bin/dovod run prog.dv a b 2>&1) | grep -q "has native code only for: win64; this build is native" || { echo "FAIL: no stub trap for a module without native code here"; fail=1; }
+[ "$(cd tests/mod && ../../bin/dovod check bad.dv 2>&1 | grep -c "looks like it belongs to module .demo.")" = 2 ] || { echo "FAIL: reserved module prefix not enforced"; fail=1; }
+(cd tests/mod && ../../bin/dovod check bad2.dv 2>&1) | grep -q "E-EFFECT: .quiet. does .demo." || { echo "FAIL: module effect leaked into a pure function"; fail=1; }
+[ "$(cd tests/mod && ../../bin/dovod check bad3.dv 2>&1 | grep -c "E-MODULE")" = 4 ] || { echo "FAIL: badmod rules"; fail=1; }
+(cd tests/mod && ../../bin/dovod check bad4.dv 2>&1) | grep -q "allowed only in a module file" || { echo "FAIL: extern outside a module accepted"; fail=1; }
+(cd tests/mod && ../../bin/dovod trust prog.dv) | grep -q "module demo: 6 native function(s) (11 lines of C" || { echo "FAIL: ledger module line"; fail=1; }
+bin/dovod check dovod/modules/video/video.dv >/dev/null 2>&1 || { echo "FAIL: module video does not check on its own"; fail=1; }
+bin/dovod spec video | grep -q "need pct >= 25 and pct <= 400" || { echo "FAIL: spec video"; fail=1; }
 bin/dovod trust tests/bad/evidence.dv | grep -q "affects: norm, main" || { echo "FAIL: trust ledger"; fail=1; }
 out=$(bin/dovod check tests/vacuous/a_vacuous.dv 2>&1)
 [ "$(echo "$out" | grep -c E-VACUOUS)" = 4 ] || { echo "FAIL: acceptance A (vacuous examples) not all flagged"; fail=1; }

@@ -6,6 +6,8 @@
 // Everything the player DECIDES — keys, playlist, seeking, volume, the status line — is pure,
 // exampled code below; `main` only carries events in and commands out.
 
+use video
+
 record Player {
   files: List[Text]
   idx: Int          // which file is open; -1 = none
@@ -34,18 +36,6 @@ enum Cmd {
 
 record Step { p: Player, cmds: List[Cmd] }
 
-enum Ev {
-  Tick
-  Key(name: Text)
-  Click
-  DblClick
-  Wheel(up: Bool)
-  Drop(paths: List[Text])
-  Loaded
-  Ended
-  Closed
-  Failed(msg: Text)
-}
 
 const seek_small: Int = 5000
 const seek_big: Int = 60000
@@ -127,52 +117,6 @@ fn base_name(path: Text) -> Text
     }
   }
   return slice(path, from, len(path))
-}
-
-// ---------------------------------------------------------------- events
-
-fn parse_event(ev: Text) -> Ev
-  ex parse_event("tick") == Tick
-  ex parse_event("key:shift+LEFT") == Key(name: "shift+LEFT")
-  ex parse_event("click") == Click
-  ex parse_event("dblclick") == DblClick
-  ex parse_event("wheel:up") == Wheel(up: true)
-  ex parse_event("wheel:down") == Wheel(up: false)
-  ex parse_event("drop:C:\\a.mp4\nC:\\b.mkv") == Drop(paths: ["C:\\a.mp4", "C:\\b.mkv"])
-  ex parse_event("loaded") == Loaded
-  ex parse_event("ended") == Ended
-  ex parse_event("closed") == Closed
-  ex parse_event("error:no decoder") == Failed(msg: "no decoder")
-  ex parse_event("something new") == Tick
-{
-  if starts_with(ev, "key:") {
-    return Key(name: slice(ev, 4, len(ev)))
-  }
-  if starts_with(ev, "drop:") {
-    return Drop(paths: split(slice(ev, 5, len(ev)), "\n"))
-  }
-  if starts_with(ev, "error:") {
-    return Failed(msg: slice(ev, 6, len(ev)))
-  }
-  if starts_with(ev, "wheel:") {
-    return Wheel(up: ev == "wheel:up")
-  }
-  if ev == "click" {
-    return Click
-  }
-  if ev == "dblclick" {
-    return DblClick
-  }
-  if ev == "loaded" {
-    return Loaded
-  }
-  if ev == "ended" {
-    return Ended
-  }
-  if ev == "closed" {
-    return Closed
-  }
-  return Tick   // unknown events are ignored: an older player keeps working with a newer runtime
 }
 
 // ---------------------------------------------------------------- the player
@@ -258,13 +202,14 @@ fn toggle_pause(p: Player) -> Step
   ex toggle_pause(playing()) == Step(p: playing() with { paused: true }, cmds: [Pause(on: true)])
   ex toggle_pause(playing() with { paused: true }) == Step(p: playing(), cmds: [Pause(on: false)])
   ex toggle_pause(new_player([])).cmds == []
-  ex toggle_pause(playing() with { ended: true, paused: true }) == Step(p: playing(), cmds: [Seek(ms: 0), Pause(on: false)])
+  ex toggle_pause(playing() with { ended: true, paused: true, note: "Конец", note_until: 99 }) ==
+     Step(p: playing() with { note: "Конец" }, cmds: [Seek(ms: 0), Pause(on: false)])   // the "end" note goes away
 {
   if p.idx < 0 {
     return Step(p: p, cmds: [])
   }
   if p.ended {
-    return Step(p: p with { ended: false, paused: false }, cmds: [Seek(ms: 0), Pause(on: false)])
+    return Step(p: p with { ended: false, paused: false, note_until: 0 }, cmds: [Seek(ms: 0), Pause(on: false)])
   }
   return Step(p: p with { paused: not p.paused }, cmds: [Pause(on: not p.paused)])
 }
@@ -367,43 +312,43 @@ fn on_key(p: Player, key: Text, pos: Int, dur: Int, now: Int) -> Step
   }
 }
 
-fn on_event(p: Player, ev: Ev, pos: Int, dur: Int, now: Int) -> Step
-  ex on_event(playing(), Tick, 0, 0, 0).cmds == []
-  ex on_event(playing(), Key(name: "SPACE"), 0, 0, 0).cmds == [Pause(on: true)]
-  ex on_event(playing(), Click, 0, 0, 0).cmds == [Pause(on: true)]
-  ex on_event(playing(), DblClick, 0, 0, 0).cmds == [Full(on: true)]
-  ex on_event(playing(), Wheel(up: false), 0, 0, 0).cmds == [Volume(pct: 95), Mute(on: false)]
-  ex on_event(playing(), Wheel(up: true), 0, 0, 0).p.vol == 100
-  ex on_event(playing(), Drop(paths: ["D:\\new.mp4"]), 0, 0, 0).cmds == [Open(path: "D:\\new.mp4"), Title(text: "new.mp4 — Dovod Player")]
-  ex on_event(playing(), Drop(paths: ["D:\\new.mp4"]), 0, 0, 0).p.files == ["D:\\new.mp4"]
-  ex on_event(playing() with { paused: true, ended: true }, Loaded, 0, 0, 0).p == playing()
-  ex on_event(playing(), Ended, 0, 0, 0).p.idx == 1
-  ex on_event(playing() with { idx: 1 }, Ended, 0, 0, 5).p ==
+fn on_event(p: Player, ev: VideoEv, pos: Int, dur: Int, now: Int) -> Step
+  ex on_event(playing(), VideoTick, 0, 0, 0).cmds == []
+  ex on_event(playing(), VideoKey(name: "SPACE"), 0, 0, 0).cmds == [Pause(on: true)]
+  ex on_event(playing(), VideoClick, 0, 0, 0).cmds == [Pause(on: true)]
+  ex on_event(playing(), VideoDblClick, 0, 0, 0).cmds == [Full(on: true)]
+  ex on_event(playing(), VideoWheel(up: false), 0, 0, 0).cmds == [Volume(pct: 95), Mute(on: false)]
+  ex on_event(playing(), VideoWheel(up: true), 0, 0, 0).p.vol == 100
+  ex on_event(playing(), VideoDrop(paths: ["D:\\new.mp4"]), 0, 0, 0).cmds == [Open(path: "D:\\new.mp4"), Title(text: "new.mp4 — Dovod Player")]
+  ex on_event(playing(), VideoDrop(paths: ["D:\\new.mp4"]), 0, 0, 0).p.files == ["D:\\new.mp4"]
+  ex on_event(playing() with { paused: true, ended: true }, VideoLoaded, 0, 0, 0).p == playing()
+  ex on_event(playing(), VideoEnded, 0, 0, 0).p.idx == 1
+  ex on_event(playing() with { idx: 1 }, VideoEnded, 0, 0, 5).p ==
      playing() with { idx: 1, ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: 3600005 }
-  ex on_event(playing(), Closed, 0, 0, 0).p.quit == true
-  ex on_event(playing(), Failed(msg: "no decoder"), 0, 0, 5).p == playing() with { note: "Ошибка: no decoder", note_until: 12005 }{
+  ex on_event(playing(), VideoClosed, 0, 0, 0).p.quit == true
+  ex on_event(playing(), VideoFailed(msg: "no decoder"), 0, 0, 5).p == playing() with { note: "Ошибка: no decoder", note_until: 12005 }{
   match ev {
-    Tick => { return Step(p: p, cmds: []) }
-    Key(name) => { return on_key(p, name, pos, dur, now) }
-    Click => { return toggle_pause(p) }
-    DblClick => { return set_full(p, not p.full) }
-    Wheel(up) => {
+    VideoTick => { return Step(p: p, cmds: []) }
+    VideoKey(name) => { return on_key(p, name, pos, dur, now) }
+    VideoClick => { return toggle_pause(p) }
+    VideoDblClick => { return set_full(p, not p.full) }
+    VideoWheel(up) => {
       if up {
         return set_volume(p, p.vol + vol_step, now)
       }
       return set_volume(p, p.vol - vol_step, now)
     }
-    Drop(paths) => { return open_at(new_player_like(p, paths), 0) }
-    Loaded => { return Step(p: p with { paused: false, ended: false }, cmds: []) }
-    Ended => {
+    VideoDrop(paths) => { return open_at(new_player_like(p, paths), 0) }
+    VideoLoaded => { return Step(p: p with { paused: false, ended: false }, cmds: []) }
+    VideoEnded => {
       if p.idx + 1 < len(p.files) {
         return open_at(p, p.idx + 1)
       }
       return Step(p: p with { ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: now + 1000 * 3600 },
                   cmds: [])
     }
-    Closed => { return Step(p: p with { quit: true }, cmds: []) }
-    Failed(msg) => { return Step(p: p with { note: "Ошибка: " + msg, note_until: now + 3 * note_ms }, cmds: []) }
+    VideoClosed => { return Step(p: p with { quit: true }, cmds: []) }
+    VideoFailed(msg) => { return Step(p: p with { note: "Ошибка: " + msg, note_until: now + 3 * note_ms }, cmds: []) }
   }
 }
 
@@ -489,11 +434,11 @@ fn main() uses env, clock, video {
   var p = first.p
   var pending = apply(first.cmds)
   while not p.quit {
-    var ev = pending
-    if ev == "" {
-      ev = video_event()
+    var ev = video_parse(pending)
+    if pending == "" {
+      ev = video_next()
     }
-    let s = on_event(p, parse_event(ev), video_pos(), video_len(), now_ms())
+    let s = on_event(p, ev, video_pos(), video_len(), now_ms())
     p = s.p
     pending = apply(s.cmds)
     video_status(status(p, video_pos(), video_len(), now_ms()))
