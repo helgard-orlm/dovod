@@ -66,6 +66,14 @@ Clauses sit between the signature and the body, one per line, any order:
 
 - `ex <Bool expr>` — an example. Must call the function it belongs to. Usually `ex f(args) == expected`.
   All examples run at every `check`/`run`/`build`; a failing example is a compile error showing got/expected.
+  **An example must be able to fail.** Each passing example is run twice more with `f`'s result (its
+  outermost calls) replaced by a mutant: the zero value (`0`, `0.0`, `false`, `""`, `[]`, `none`, first
+  variant) and a perturbed result (Int ±1, Float +1.0, `not`, Text + `"\x01"`, list + one element, Opt
+  flipped, every field of a record/variant perturbed, a field-less variant → the next one). If the example
+  passes under every mutant that changed the result, it pins nothing down: `E-VACUOUS`
+  (`ex f(2) == f(2)`, `ex len([f(1)]) == 1`, `ex f(1) == 2 or true`). A mutant that cannot differ from the
+  real result, or that never fires (f called only from inside another function), is not judged.
+  By design this also flags symmetric examples like `ex abs(-5) == abs(5)` — write `ex abs(-5) == 5`.
 - `need <Bool expr>` — precondition over the parameters. Checked on every call.
 - `give <Bool expr>` — postcondition; must mention `out`. Checked on every return.
 - `assume "reason"` — "I could not example this; take it on faith because …". Allowed, but it is
@@ -84,7 +92,9 @@ Rules:
   cases, but not a misunderstood task — the same misunderstanding goes into both. For that, give
   `dovod trust FILE --witness W.dv`: W.dv is written by someone else (a human, another model), starts
   with `use "FILE"`, and holds functions like `fn w1() -> Bool  ex w1() { return f(2) == 4 }`.
-  Every function of FILE called directly from W.dv becomes `witnessed` or `witness-failed`.
+  Every function of FILE called directly from a W.dv function that has examples becomes `witnessed`
+  (if it was `self-checked`) or `witness-failed` (if any of those examples fails); `assumed` and
+  `partial` stay as they are, with the witness result in the notes.
 
 Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand`.
 There is no other way to reach the outside world, so the effects of `main` are the whole truth
@@ -134,14 +144,15 @@ data, copy it: `var mine = param`.
 
 ## Expressions
 
-Literals: `42` `3.5` `true` `false` `"text\n"` (escapes `\n \t \r \\ \" \0`) `[1, 2, 3]` `none` `some(x)`.
+Literals: `42` `3.5` `true` `false` `"text\n"` (escapes `\n \t \r \\ \" \0 \xNN` with NN in 00..7F) `[1, 2, 3]` `none` `some(x)`.
 Constructors always name their fields: `Point(x: 1.0, y: 2.0)`, `Rect(w: 2.0, h: 3.0)`, `Dot`.
 Access: `p.x`, `xs[i]` (out of range traps).
 
 Operators, lowest to highest: `or` · `and` · `not` · `== != < <= > >=` (do not chain) · `+ -` ·
 `* / %` · unary `-`. `and`/`or` are lazy. `+` also joins two `Text` or two lists of the same type.
 `==` works structurally on every type. `<` works on `Int`, `Float`, `Text`.
-Integer `/` truncates; division by zero and overflow trap.
+Integer `/` truncates; division by zero (Int or Float) and Int overflow trap. Float overflow gives
+infinity (IEEE), it does not trap. `or_else(o, d)` computes `d` only when `o` is `none`.
 
 A typed hole `?name` may stand for any expression: the checker reports the type expected there and
 the names in scope. Use it to ask the compiler what is needed.
@@ -189,5 +200,10 @@ Workflow for an agent: write the signature and the examples first, put `?todo` i
 ## Not in 0.1 (deliberately small)
 
 Maps, generics, closures, modules with namespaces, Unicode-aware text indexing, a formatter, network
-and process effects, proofs beyond examples. Runtime traps are: failed `need`/`give`, integer
-overflow, division by zero, index/slice out of range, `pop` on empty, `trap(...)`.
+and process effects, proofs beyond examples. Known gap: calls made only inside `ex`/`need`/`give` are not
+counted in the ledger's "rests on assumed".
+
+Runtime traps (the complete list): failed `need`/`give` · Int overflow (`+ - *`, unary `-`, `abs`) ·
+division by zero (`/`, `%`; Int and Float) · index/slice out of range (`xs[i]`, `byte`, `slice`) ·
+`pop` on an empty list · `trunc` of a Float outside Int range · `from_byte` outside 0..255 ·
+`split`/`replace` with an empty pattern · `rand_int` with lo > hi · out of memory · `trap(...)`.

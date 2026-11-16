@@ -83,9 +83,16 @@ def lex(src, file):
                 c = body[i]
                 if c == '\\':
                     e = body[i + 1]
+                    if e == 'x':
+                        hx = body[i + 2:i + 4]
+                        if len(hx) != 2 or any(ch not in '0123456789abcdefABCDEF' for ch in hx) or int(hx, 16) > 0x7F:
+                            raise DvError(Diag('E-SYNTAX', file, line, col, "`\\x` needs two hex digits 00..7F"))
+                        out.append(chr(int(hx, 16)))
+                        i += 4
+                        continue
                     if e not in ESC:
                         raise DvError(Diag('E-SYNTAX', file, line, col, f"unknown escape \\{e}",
-                                           'use one of \\n \\t \\r \\\\ \\" \\0'))
+                                           'use one of \\n \\t \\r \\\\ \\" \\0 \\xNN'))
                     out.append(ESC[e])
                     i += 2
                 else:
@@ -272,6 +279,9 @@ class Parser:
                 e = self.p_expr()
                 e.src = self.clause_text(st)
                 {'need': needs, 'give': gives, 'ex': exs}[tok.val].append(e)
+        if self.at('op', '->'):
+            self.fail("the return type goes right after the parameters, before `uses` and the clauses",
+                      f"write `fn {name}(...) -> Type uses ...`")
         body = self.p_block()
         end_line = self.t[self.i - 1].line
         return Node('Fn', at, name=name, params=params, ret=ret, uses=uses, needs=needs, gives=gives,

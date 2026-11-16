@@ -5,7 +5,7 @@
 *Dovod* (Russian «довод») means *an argument, a piece of evidence*. In Dovod, code carries its evidence:
 
 - a pure function **does not compile** without examples (`ex`) — or an explicit `assume "why"`;
-- an example must call its own function (no tests that test nothing), and all examples run on every build;
+- an example must be able to fail: each one is re-run against two mutants of its function's result, and an example that still passes (`ex f(2) == f(2)`) is rejected; all examples run on every build;
 - the compiler reports every block no example ever reached;
 - effects are in the signature (`uses io, fs_read`), exactly — an undeclared *or unused* effect is an error, and there is no other way to reach the outside world;
 - `dovod trust` prints a ledger: what the program can and cannot touch, the status of every function, and what is taken on faith — together with everything that depends on it.
@@ -36,7 +36,7 @@ An AI writes code faster than anyone can check it. So the language makes checkin
 | An AI author…                                   | …so Dovod                                                                 |
 |-------------------------------------------------|---------------------------------------------------------------------------|
 | writes fast; checking is the bottleneck         | every pure function must carry examples; the compiler runs them           |
-| can write tests that test nothing               | an example must call its own function; unreached branches are reported    |
+| can write tests that test nothing               | every example is re-run against mutants and must catch them; unreached branches are reported |
 | reads code in fragments                         | no globals, no references, no hidden effects: a signature tells all       |
 | makes small slips (wrong name, missed case)     | no shadowing, no unused names, exhaustive `match`, no implicit conversion |
 | hands code to a human who will not read it      | `dovod trust` prints what the program can touch and what is taken on faith|
@@ -97,6 +97,15 @@ palindrome, mean, run-length encoding, bracket balance, RPN calculator, record i
 **8/8 passed `check`, 7 on the first attempt; hidden tests 43/43.** The one retry was a compiler wart
 (a local variable named `out` was refused) — fixed since. The tasks turned out too easy to show where
 the evidence rule pays off: glm's own examples caught 0 bugs because there were none. Harder tasks next.
+
+## Review by glm-5.3
+
+The language was reviewed by glm-5.3 as a technical co-author (2026-11-16). Confirmed by running its
+counterexamples and fixed: examples that test nothing were accepted (now the mutant check, with glm's
+acceptance sets in `tests/vacuous/`), a witness with no examples counted as a witness, `or_else`
+evaluated its default eagerly, Float division by zero did not trap, `show` did not escape control bytes,
+`parse_float` accepted `0x10`/`inf`, the list of traps in the spec was incomplete. Two of its findings were
+withdrawn after discussion (random range, ledger dependencies).
 
 ## Use
 

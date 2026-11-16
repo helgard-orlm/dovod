@@ -1,0 +1,5 @@
+fn double(x: Int) -> Int
+  ex double(2) == 4
+{
+  return x * 2
+}

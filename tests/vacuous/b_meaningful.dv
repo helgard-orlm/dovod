@@ -1,0 +1,67 @@
+// Acceptance B (from glm's review): meaningful examples; none may be flagged.
+record P { x: Int, y: Int }
+fn tens(x: Int) -> Int
+  ex tens(1) % 10 == 0
+{
+  return x * 10
+}
+fn tiny(x: Float) -> Float
+  ex near(tiny(1.0), 0.0, 0.5)
+{
+  return x * 0.0001
+}
+fn mk(x: Int) -> P
+  ex mk(5).y == 0
+{
+  return P(x: x, y: 0)
+}
+fn three(t: Text) -> List[Text]
+  ex len(three("a")) == 3
+{
+  return [t, t, t]
+}
+fn pa(x: Int) -> P
+  ex pa(1).x == 1
+{
+  return P(x: x, y: 7)
+}
+fn sh(t: Text) -> Text
+  ex show(sh("x")) == "\"x!\""
+{
+  return t + "!"
+}
+fn is_even(n: Int) -> Bool
+  ex is_even(4)
+  ex not is_even(3)
+{
+  return n % 2 == 0
+}
+fn fact(n: Int) -> Int
+  need n >= 0
+  ex fact(5) == 120
+  ex fact(0) == 1
+{
+  if n == 0 { return 1 }
+  return n * fact(n - 1)
+}
+fn outer(x: Int) -> Int
+  ex outer(2) == 3
+{
+  return tens(x) - 17
+}
+fn first(xs: List[Int]) -> Opt[Int]
+  ex first([]) == none
+  ex first([4, 5]) == some(4)
+{
+  if len(xs) == 0 { return none }
+  return some(xs[0])
+}
+enum Light { Red, Green }
+fn flip(l: Light) -> Light
+  ex flip(Red) == Green
+{
+  match l {
+    Red => { return Green }
+    Green => { return Red }
+  }
+}

@@ -91,9 +91,11 @@ def analyse(path, run_examples=True):
             try:
                 out = subprocess.run([exe], capture_output=True, text=True, timeout=60)
                 lines, crashed = out.stdout.splitlines(), out.returncode != 0
+                why = f"crashed (exit code {out.returncode}; e.g. stack overflow from deep recursion)"
             except subprocess.TimeoutExpired as ex:
                 lines = (ex.stdout or b'').decode('utf-8', 'replace').splitlines()
                 crashed = True
+                why = "did not finish within 60 s (endless loop or very slow code)"
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         done = set()
@@ -114,6 +116,15 @@ def analyse(path, run_examples=True):
                 else:
                     res.diags.append(Diag('E-EXAMPLE', e.file, e.line, e.col,
                                           f"example trapped: `{e.src}` — {p[3] if len(p) > 3 else ''}"))
+            elif p[0] == 'MUT':
+                fired, survived = int(p[2]), int(p[3])
+                if fired and survived == fired:
+                    fn, e = gen.exs[int(p[1])]
+                    res.diags.append(Diag('E-VACUOUS', e.file, e.line, e.col,
+                                          f"this example also passes when `{fn}` returns a different value "
+                                          f"(zero or a perturbed result), so it does not pin down `{fn}`: `{e.src}`",
+                                          f"compare the result with a concrete expected value: `ex {fn}(...) == <value>`"))
+                    rep[fn]['vacuous'] = rep[fn].get('vacuous', 0) + 1
             elif p[0] == 'COV':
                 c = gen.cov[int(p[1])]
                 c['count'] = int(p[2])
@@ -121,7 +132,7 @@ def analyse(path, run_examples=True):
             for i, (fn, e) in enumerate(gen.exs):
                 if i not in done:
                     res.diags.append(Diag('E-EXAMPLE', e.file, e.line, e.col,
-                                          f"example did not finish (crash, endless loop or stack overflow): `{e.src}`"))
+                                          f"example {why}: `{e.src}`"))
                     break
         for c in gen.cov:
             r = rep[c['fn']]
@@ -134,7 +145,7 @@ def analyse(path, run_examples=True):
                 r['unreached'].append((c['line'], c['kind']))
         for r in rep.values():
             if r['status'] == 'self-checked':
-                if r['passed'] < r['examples']:
+                if r['passed'] < r['examples'] or r.get('vacuous'):
                     r['status'] = 'failed'
                 elif r['hit'] < r['blocks']:
                     r['status'] = 'partial'
@@ -151,7 +162,7 @@ def analyse(path, run_examples=True):
                 continue
             seen.add(x)
             stack.extend(ck.fns[x].calls)
-        rep[f.name]['rests_on'] = sorted(x for x in seen if rep[x]['status'] == 'assumed' and x != f.name)
+        rep[f.name]['rests_on'] = sorted(x for x in seen if rep[x]['assume'] and x != f.name)
     res.fns = [rep[f] for f in ck.fns]
     res.ok = not res.diags
     return res
@@ -203,15 +214,20 @@ def apply_witness(res, wpath):
     for f in wfns:
         bad = any(f.node.line <= ln <= f.node.end_line for ln in failed_lines)
         n_ex = len(f.node.exs)
+        if n_ex == 0:
+            continue
         for callee in f.calls:
             if callee in own:
                 h = hits.setdefault(callee, [0, 0])
                 h[0] += n_ex
                 h[1] += 0 if bad else n_ex
     for name, (total, ok) in hits.items():
-        own[name]['witness'] = f"{ok}/{total}"
-        if own[name]['status'] != 'shell':
-            own[name]['status'] = 'witnessed' if ok == total else 'witness-failed'
+        f = own[name]
+        f['witness'] = f"{ok}/{total}"
+        if ok < total:
+            f['status'] = 'witness-failed'
+        elif f['status'] == 'self-checked':
+            f['status'] = 'witnessed'
     return w
 
 
@@ -230,11 +246,11 @@ def cmd_trust(res, path, witness=None):
         exs = f"{f['passed']}/{f['examples']}" if st not in ('shell', 'assumed') or f['examples'] else '-'
         bl = f"{f['hit']}/{f['blocks']}" if f['blocks'] else '-'
         notes = []
-        if st == 'assumed':
+        if f['assume']:
             notes.append(f"ASSUMED: \"{f['assume']}\"")
         if st == 'shell':
             notes.append("effects: " + (', '.join(f['uses']) or 'none'))
-        if f['unreached'] and st == 'partial':
+        if f['unreached']:
             notes.append("never ran: " + ', '.join(f"line {l} ({k})" for l, k in f['unreached']))
         if f.get('witness'):
             notes.append(f"independent examples passed: {f['witness']}")
@@ -256,7 +272,7 @@ def cmd_trust(res, path, witness=None):
     print("  witnessed    = also passed examples written by someone else (--witness FILE).")
     print("  summary: " + ', '.join(f"{v} {k}" for k, v in cnt.items())
           + f". Unchecked shell = {shell} of {total} function lines ({100 * shell // max(total, 1)}%).")
-    assumed = [f for f in res.fns if f['status'] == 'assumed']
+    assumed = [f for f in res.fns if f['assume']]
     if assumed:
         print("  taken on faith:")
         for f in assumed:

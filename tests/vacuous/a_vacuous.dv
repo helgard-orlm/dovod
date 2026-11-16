@@ -1,0 +1,21 @@
+// Acceptance A (from glm's review): every example here is empty and must be E-VACUOUS.
+fn addone(x: Int) -> Int
+  ex addone(2) == addone(2)
+{
+  return x + 100
+}
+fn plus_two(x: Int) -> Int
+  ex len([plus_two(1)]) == 1
+{
+  return x + 2
+}
+fn triple(x: Int) -> Int
+  ex triple(1) == 2 or true
+{
+  return x * 3
+}
+fn words2(t: Text) -> List[Text]
+  ex len(words2("a b")) >= 0
+{
+  return split(t, " ")
+}

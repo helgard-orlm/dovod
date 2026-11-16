@@ -1,0 +1,5 @@
+use "t.dv"
+fn w() uses io
+{
+  print(show(double(3)))
+}

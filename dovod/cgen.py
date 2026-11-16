@@ -201,6 +201,7 @@ class CGen:
                    f"if (i < 0 || j < i || j > a.n) dv_trap(\"slice bounds out of range\", loc); "
                    f"{X} r; r.n = j - i; r.cap = r.n; r.p = r.n ? dv_alloc(sizeof({E}) * (size_t)r.n) : NULL; "
                    f"for (int64_t k = 0; k < r.n; k++) r.p[k] = {self.copy(et, 'a.p[i + k]')}; return r;")
+                fn(f"{X} {X}_perturb({X} a)", f"{X} r = {X}_copy(a); {E} z = {{0}}; {X}_push(&r, z); return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)",
                    f"dv_buf_puts(b, \"[\"); for (int64_t i = 0; i < a.n; i++) {{ if (i) dv_buf_puts(b, \", \"); "
                    f"{self.show(et, 'b', 'a.p[i]')} }} dv_buf_puts(b, \"]\");")
@@ -211,6 +212,7 @@ class CGen:
                     fn(f"void {X}_free({X} a)", f"if (a.has) {{ {self.free(et, 'a.v')} }}")
                 fn(f"bool {X}_eq({X} a, {X} b)",
                    f"if (a.has != b.has) return false; return !a.has || {self.eq(et, 'a.v', 'b.v')};")
+                fn(f"{X} {X}_perturb({X} a)", f"{X} r = {{0}}; r.has = !a.has; return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)",
                    f"if (!a.has) {{ dv_buf_puts(b, \"none\"); return; }} dv_buf_puts(b, \"some(\"); "
                    f"{self.show(et, 'b', 'a.v')} dv_buf_puts(b, \")\");")
@@ -222,6 +224,8 @@ class CGen:
                     fn(f"void {X}_free({X} a)", ' '.join(self.free(ft, 'a.f_' + n) for n, ft in fs))
                 fn(f"bool {X}_eq({X} a, {X} b)",
                    "return " + ' && '.join(self.eq(ft, 'a.f_' + n, 'b.f_' + n) for n, ft in fs) + ";")
+                fn(f"{X} {X}_perturb({X} a)", f"{X} r; " + ' '.join(
+                    f"r.f_{n} = {pf(self.reg(ft))}_perturb(a.f_{n});" for n, ft in fs) + " return r;")
                 sh = [f"dv_buf_puts(b, {cstr(t + '(')});"]
                 for k, (n, ft) in enumerate(fs):
                     sh.append(f"dv_buf_puts(b, {cstr((', ' if k else '') + n + ': ')}); {self.show(ft, 'b', 'a.f_' + n)}")
@@ -253,6 +257,14 @@ class CGen:
                     shs.append(f"case {k}: {' '.join(sh)} break;")
                 fn(f"bool {X}_eq({X} a, {X} b)",
                    f"if (a.tag != b.tag) return false; switch (a.tag) {{ {' '.join(eqs)} default: return true; }}")
+                pts = []
+                for k2, (v, fs) in enumerate(vs):
+                    if fs:
+                        pts.append(f"case {k2}: r.tag = {k2}; " + ' '.join(
+                            f"r.u.V_{v}.f_{n} = {pf(self.reg(ft))}_perturb(a.u.V_{v}.f_{n});" for n, ft in fs) + " break;")
+                    else:
+                        pts.append(f"case {k2}: r.tag = {(k2 + 1) % len(vs)}; break;")
+                fn(f"{X} {X}_perturb({X} a)", f"{X} r = {{0}}; switch (a.tag) {{ {' '.join(pts)} default: break; }} return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)", f"switch (a.tag) {{ {' '.join(shs)} default: break; }}")
         return fw + lists + structs + protos + bodies
 
@@ -384,6 +396,8 @@ class CGen:
             f = {'+': 'dv_add', '-': 'dv_sub', '*': 'dv_mul', '/': 'dv_div', '%': 'dv_mod'}[op]
             return f"{f}({a}, {b}, {L})", False
         if lt == 'Float':
+            if op == '/':
+                return f"dv_fdiv({a}, {b}, {L})", False
             return f"({a} {op} {b})", False
         if lt == 'Text':
             return f"dv_text_concat({a}, {b})", True
@@ -403,6 +417,13 @@ class CGen:
 
     def builtin(self, e):
         n, L = e.name, self.loc(e)
+        if n == 'or_else':  # lazy: the default is computed only when the Opt is none
+            o = self.plain(e.args[0].ty, self.val(e.args[0]))
+            x = self.plain(e.ty)
+            self.emit(f"if ({o}.has) {{ {x} = {self.copy(e.ty, o + '.v')}; }} else {{")
+            d = self.val(e.args[1], sink=True)
+            self.emit(f"{x} = {d}; }}")
+            return x
         a = [self.val(x) for x in e.args]
         if n in SIMPLE:
             return SIMPLE[n].format(*a, L=L)
@@ -417,9 +438,6 @@ class CGen:
         if n == 'slice':
             f = 'dv_text_slice' if t0 == 'Text' else self.cty(t0) + '_slice'
             return f"{f}({a[0]}, {a[1]}, {a[2]}, {L})"
-        if n == 'or_else':
-            o = self.plain(t0, a[0])
-            return f"({o}.has ? {self.copy(e.ty, o + '.v')} : {self.copy(e.ty, a[1])})"
         if n == 'abs':
             return f"dv_abs_i({a[0]}, {L})" if t0 == 'Int' else f"fabs({a[0]})"
         if n in ('min', 'max'):
@@ -578,7 +596,8 @@ class CGen:
         self.fn = f
         params = ', '.join(f"{self.cty(t)} v_{p}" for p, t in f.params) or 'void'
         ret = self.cty(f.ret)
-        contract = bool(n.needs or n.gives)
+        mutable = self.mode == 'test' and f.ret != 'Void' and not f.uses and f.name != 'main'
+        contract = bool(n.needs or n.gives) or mutable
         impl = f"F_{f.name}__impl" if contract else f"F_{f.name}"
         protos.append(f"static {ret} {impl}({params});")
         self.start()
@@ -598,10 +617,23 @@ class CGen:
         if f.ret == 'Void':
             self.emit(call + ";")
         else:
-            self.emit(f"{ret} v_out = {call};")
+            if mutable:
+                k = self.fn_id[f.name]
+                self.emit(f"dv_depth[{k}]++;")
+                self.emit(f"{ret} v_out = {call};")
+                self.emit(f"dv_depth[{k}]--;")
+            else:
+                self.emit(f"{ret} v_out = {call};")
             for e in n.gives:
                 c = self.val(e)
                 self.emit(f"if (!({c})) dv_trap({cstr('give failed: ' + e.src + ' — result of ' + f.name)}, {self.loc(e)});")
+            if mutable:
+                t = f.ret
+                self.emit(f"if (dv_mut_mode && dv_mut_target == {k} && dv_depth[{k}] == 0) {{")
+                self.emit(f"  {ret} m = dv_mut_mode == 1 ? ({ret}){{0}} : {pf(self.reg(t))}_perturb(v_out);")
+                self.emit(f"  if (!{self.eq(t, 'm', 'v_out')}) {{ {self.free(t, 'v_out')} v_out = m; dv_mut_fired++; }}")
+                self.emit(f"  else {{ {self.free(t, 'm')} }}")
+                self.emit("}")
         self.frees(self.scopes)
         if f.ret != 'Void':
             self.emit("return v_out;")
@@ -618,11 +650,11 @@ class CGen:
             if not self.heap(t):
                 l, r = self.plain(t, l), self.plain(t, r)
             self.emit(f"bool ok = {self.eq(t, l, r)};")
-            self.emit("if (!ok) { dv_buf g = {0}, w = {0}; " + self.show(t, '&g', l) + ' ' + self.show(t, '&w', r) +
+            self.emit("if (!ok && !dv_quiet) { dv_buf g = {0}, w = {0}; " + self.show(t, '&g', l) + ' ' + self.show(t, '&w', r) +
                       f' printf("EX\\t{i}\\tfail\\t%s\\t%s\\n", g.p, w.p); free(g.p); free(w.p); }}')
         else:
             self.emit(f"bool ok = {self.val(e)};")
-            self.emit(f'if (!ok) printf("EX\\t{i}\\tfail\\n");')
+            self.emit(f'if (!ok && !dv_quiet) printf("EX\\t{i}\\tfail\\n");')
         self.frees(self.scopes)
         self.emit("return ok;")
         bodies.append(f"static bool EX_{i}(void) {{")
@@ -642,6 +674,7 @@ class CGen:
             else:
                 consts.append(f"static const bool C_{c.name} = {'true' if c.value else 'false'};")
         protos, bodies = [], []
+        self.fn_id = {name: k for k, name in enumerate(ck.fns)}
         for f in ck.fns.values():
             self.gen_fn(f, protos, bodies)
         self.fn = None
@@ -654,16 +687,31 @@ class CGen:
             for i, (_, e) in enumerate(self.exs):
                 self.gen_ex(i, e, bodies)
             main.append("int main(void) { dv_test_mode = 1;")
-            for i in range(len(self.exs)):
-                main.append(f'if (setjmp(dv_jmp) == 0) {{ if (EX_{i}()) printf("EX\\t{i}\\tok\\n"); }} '
+            for i, (fname, _) in enumerate(self.exs):
+                main.append(f'if (setjmp(dv_jmp) == 0) {{ if (EX_{i}()) {{ printf("EX\\t{i}\\tok\\n"); dv_mutate({i}, {self.fn_id[fname]}, EX_{i}); }} }} '
                             f'else printf("EX\\t{i}\\ttrap\\t%s\\n", dv_trap_msg); fflush(stdout);')
             main.append(f'for (int i = 0; i < {len(self.cov)}; i++) printf("COV\\t%d\\t%lld\\n", i, dv_cov[i]);')
             main.append("return 0; }")
             covdef = [f"static long long dv_cov[{len(self.cov) + 1}];", "#define DV_COV(i) (dv_cov[i]++)"]
+            mut = [f"static int dv_depth[{len(ck.fns) + 1}];",
+                   "static int dv_mut_mode, dv_mut_target = -1, dv_mut_fired, dv_quiet;",
+                   # run example i twice more, with f's outermost result replaced by the zero / perturbed value
+                   "static void dv_mutate(int i, int target, bool (*ex)(void)) {",
+                   "  int fired = 0, survived = 0;",
+                   "  for (int mode = 1; mode <= 2; mode++) {",
+                   "    memset(dv_depth, 0, sizeof dv_depth); dv_mut_mode = mode; dv_mut_target = target; dv_mut_fired = 0; dv_quiet = 1;",
+                   "    bool passed = false;",
+                   "    if (setjmp(dv_jmp) == 0) passed = ex();",
+                   "    if (dv_mut_fired) { fired++; if (passed) survived++; }",
+                   "  }",
+                   "  dv_mut_mode = 0; dv_mut_target = -1; dv_quiet = 0; memset(dv_depth, 0, sizeof dv_depth);",
+                   '  printf("MUT\\t%d\\t%d\\t%d\\n", i, fired, survived);',
+                   "}"]
         else:
             main.append("int main(int argc, char** argv) { dv_argc = argc; dv_argv = argv; F_main(); return 0; }")
             covdef = ["#define DV_COV(i)"]
+            mut = []
         types = self.gen_types()
         pre = open(os.path.join(HERE, 'rt_pre.h')).read()
         post = open(os.path.join(HERE, 'rt_post.h')).read()
-        return '\n'.join([pre] + covdef + types + [post] + consts + protos + bodies + main) + '\n'
+        return '\n'.join([pre] + covdef + mut + types + [post] + consts + protos + bodies + main) + '\n'

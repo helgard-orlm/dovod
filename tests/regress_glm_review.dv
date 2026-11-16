@@ -1,0 +1,20 @@
+fn esc(t: Text) -> Text
+  ex esc("a\x01b\0") == "\"a\\x01b\\0\""
+  ex esc("\x41") == "\"A\""
+{
+  return show(t)
+}
+fn pf(t: Text) -> Opt[Float]
+  ex pf("1.5e2") == some(150.0)
+  ex pf("0x10") == none
+  ex pf("inf") == none
+  ex pf("-.5") == some(-0.5)
+{
+  return parse_float(t)
+}
+fn lazy_heap(o: Opt[Text], d: Text) -> Text
+  ex lazy_heap(some("a"), "zz") == "a"
+  ex lazy_heap(none, "zz") == "zz!"
+{
+  return or_else(o, d + "!")
+}

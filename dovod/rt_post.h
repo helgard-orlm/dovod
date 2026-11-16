@@ -30,6 +30,9 @@ static O_Int dv_parse_int(dv_text t) {
 static O_Float dv_parse_float(dv_text t) {
     O_Float r = {0};
     if (t.n == 0 || t.n > 400 || t.p[0] == ' ' || t.p[0] == '\t' || t.p[0] == '\n') return r;
+    bool digit = false;
+    for (int64_t i = 0; i < t.n; i++) { char c = t.p[i]; if (c >= '0' && c <= '9') digit = true; else if (!strchr("+-.eE", c)) return r; }
+    if (!digit) return r;
     char b[402]; memcpy(b, t.p, (size_t)t.n); b[t.n] = 0;
     char* end; double v = strtod(b, &end);
     if (end != b + t.n) return r;

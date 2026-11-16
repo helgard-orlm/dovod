@@ -47,6 +47,7 @@ static inline int64_t dv_add(int64_t a, int64_t b, const char* loc) { int64_t r;
 static inline int64_t dv_sub(int64_t a, int64_t b, const char* loc) { int64_t r; if (__builtin_sub_overflow(a, b, &r)) dv_trap("integer overflow in -", loc); return r; }
 static inline int64_t dv_mul(int64_t a, int64_t b, const char* loc) { int64_t r; if (__builtin_mul_overflow(a, b, &r)) dv_trap("integer overflow in *", loc); return r; }
 static inline int64_t dv_div(int64_t a, int64_t b, const char* loc) { if (b == 0) dv_trap("division by zero", loc); if (a == INT64_MIN && b == -1) dv_trap("integer overflow in /", loc); return a / b; }
+static inline double dv_fdiv(double a, double b, const char* loc) { if (b == 0.0) dv_trap("division by zero", loc); return a / b; }
 static inline int64_t dv_mod(int64_t a, int64_t b, const char* loc) { if (b == 0) dv_trap("division by zero in %", loc); if (b == -1) return 0; return a % b; }
 static inline int64_t dv_neg(int64_t a, const char* loc) { if (a == INT64_MIN) dv_trap("integer overflow in negation", loc); return -a; }
 static inline int64_t dv_abs_i(int64_t a, const char* loc) { return a < 0 ? dv_neg(a, loc) : a; }
@@ -104,10 +105,18 @@ static void dv_text_show(dv_buf* b, dv_text t) {
         else if (c == '\n') dv_buf_put(b, "\\n", 2);
         else if (c == '\t') dv_buf_put(b, "\\t", 2);
         else if (c == '\r') dv_buf_put(b, "\\r", 2);
+        else if (c == 0) dv_buf_put(b, "\\0", 2);
+        else if ((unsigned char)c < 32 || c == 127) { char h[5]; snprintf(h, sizeof h, "\\x%02X", (unsigned char)c); dv_buf_put(b, h, 4); }
         else dv_buf_put(b, &c, 1);
     }
     dv_buf_put(b, "\"", 1);
 }
+
+// ---- mutants for the "an example must be able to fail" check
+static inline int64_t dv_int_perturb(int64_t a) { return a == INT64_MAX ? a - 1 : a + 1; }
+static inline double dv_float_perturb(double a) { return a + 1.0; }
+static inline bool dv_bool_perturb(bool a) { return !a; }
+static dv_text dv_text_perturb(dv_text a) { return dv_text_concat(a, DV_LIT("\x01", 1)); }
 
 // ---- effects with scalar results
 static void dv_print(dv_text t) { if (t.n) fwrite(t.p, 1, (size_t)t.n, stdout); fputc('\n', stdout); }
