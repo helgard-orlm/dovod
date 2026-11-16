@@ -263,7 +263,10 @@ fn main() uses io, ui, ble {
   var m = start()
   var alive = true
   if not ble_scan_start(m.active) {
+    print("ble: скан не поднялся (журнал выше говорит, где именно)")
     m = m with { on: false, msg: "нет блютуса — включи адаптер и нажми ▶" }
+  } else {
+    print("ble: слушаю")
   }
   ui_show(view(m))
   while alive {

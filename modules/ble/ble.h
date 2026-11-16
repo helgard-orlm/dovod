@@ -176,11 +176,26 @@ static void* dv_ble_w;                  // the watcher
 static int64_t dv_ble_tok_recv, dv_ble_tok_stop;
 static bool dv_ble_watching, dv_ble_stopping;
 static volatile LONG dv_ble_busy;       // callbacks in flight (the stop handshake waits for 0)
+static volatile LONG dv_ble_dbg = 5;    // the first N shouts leave a stderr trace (crash hunting)
+
+// the start steps and the first events leave a trail; a hard crash says where it happened
+static void dv_ble_say(const char* what) {
+    fprintf(stderr, "ble: %s\n", what);
+    fflush(stderr);
+}
+static LONG WINAPI dv_ble_crash(EXCEPTION_POINTERS* ep) {
+    fprintf(stderr, "ble: CRASH code=%08lx addr=%p\n",
+            ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0,
+            ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL);
+    fflush(stderr);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
 
 static void dv_ble_ensure(void) {
     if (!dv_ble_made) {
         InitializeCriticalSection(&dv_ble_cs);
         InitializeConditionVariable(&dv_ble_cv);
+        SetUnhandledExceptionFilter(dv_ble_crash);
         dv_ble_made = 1;
     }
 }
@@ -278,6 +293,9 @@ static HRESULT WINAPI dv_ble_qi_stop(void* self, REFIID riid, void** out) {
 static HRESULT WINAPI dv_ble_adv_invoke(void* self, void* sender, void* args) {
     (void)self; (void)sender;
     InterlockedIncrement(&dv_ble_busy);
+    int dbg = 0;
+    if (dv_ble_dbg > 0) { dbg = (int)InterlockedDecrement(&dv_ble_dbg) + 1; }
+    if (dbg) { dv_ble_say("shout: arrived"); }
     if (args) {
         int16_t rssi = 0;
         uint64_t mac = 0;
@@ -286,6 +304,7 @@ static HRESULT WINAPI dv_ble_adv_invoke(void* self, void* sender, void* args) {
         av->get_RawSignalStrengthInDBm(args, &rssi);
         av->get_BluetoothAddress(args, &mac);
         av->get_Advertisement(args, &ad);
+        if (dbg) { dv_ble_say(ad ? "shout: args read" : "shout: no ad"); }
 
         dv_buf b = {0};
         char s[64];
@@ -309,6 +328,7 @@ static HRESULT WINAPI dv_ble_adv_invoke(void* self, void* sender, void* args) {
                 if (n) { dv_ble_utf8(&b, w, n); have_name = 1; }
                 WindowsDeleteString(h);
             }
+            if (dbg) { dv_ble_say("shout: name done"); }
         }
         if (!have_name) { dv_buf_puts(&b, "-"); }
         dv_buf_puts(&b, "\n");
@@ -334,6 +354,7 @@ static HRESULT WINAPI dv_ble_adv_invoke(void* self, void* sender, void* args) {
                 }
                 ((dv_ble_vectorVtbl*)*(void**)vec)->Release(vec);
             }
+            if (dbg) { dv_ble_say("shout: services done"); }
         }
         if (!have_svc) { dv_buf_puts(&b, "-"); }
         dv_buf_puts(&b, "\n");
@@ -424,6 +445,7 @@ static void dv_ble_scan_stop(void);
 static bool dv_ble_scan_start(bool active) {
     dv_ble_ensure();
     if (dv_ble_w) { dv_ble_scan_stop(); }            // restart cleanly (e.g. after a spontaneous "off")
+    dv_ble_say("scan_start");
     if (!dv_ble_ro) {
         HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
         if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) { return false; }
@@ -440,6 +462,7 @@ static bool dv_ble_scan_start(bool active) {
     hr = ((dv_ble_actfVtbl*)*(void**)actf)->ActivateInstance(actf, &insp);
     ((dv_ble_actfVtbl*)*(void**)actf)->Release(actf);
     if (FAILED(hr) || !insp) { return false; }
+    dv_ble_say("factory made");
     void* w = NULL;
     hr = ((dv_ble_actfVtbl*)*(void**)insp)->QueryInterface(insp, &dv_ble_iid_watcher, &w);
     ((dv_ble_actfVtbl*)*(void**)insp)->Release(insp);   // any IInspectable-shaped vtable: Release sits at slot 2
@@ -447,6 +470,7 @@ static bool dv_ble_scan_start(bool active) {
 
     dv_ble_watcherVtbl* wv = *(dv_ble_watcherVtbl**)w;
     int64_t tr = 0, ts = 0;
+    dv_ble_say("watcher made");
     dv_ble_stopping = 0;
     if (FAILED(wv->put_ScanningMode(w, active ? 1 : 0)) ||
         FAILED(wv->add_Received(w, &dv_ble_recv_obj, &tr)) ||
@@ -459,12 +483,14 @@ static bool dv_ble_scan_start(bool active) {
     }
     dv_ble_tok_recv = tr;
     dv_ble_tok_stop = ts;
+    dv_ble_say("handlers on");
     if (FAILED(wv->Start(w))) {
         wv->remove_Received(w, tr);
         wv->remove_Stopped(w, ts);
         wv->Release(w);
         return false;
     }
+    dv_ble_say("start called");
     int32_t st = 0;
     for (int i = 0; i < 60; i++) {                     // up to ~3 s for a slow radio (breaks on success)
         wv->get_Status(w, &st);
@@ -484,6 +510,7 @@ static bool dv_ble_scan_start(bool active) {
         wv->Release(w);
         return false;
     }
+    dv_ble_say("STARTED");
     dv_ble_w = w;
     dv_ble_watching = true;
     // drop a stale "off" of the dead session: it would be advice about a radio that is back
