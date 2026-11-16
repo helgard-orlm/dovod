@@ -47,7 +47,8 @@ fn hidden_7() -> Bool
 {
   return rpn("") == none
 }
-// A reviewer who reads the task as "overflow gives none" would add this; rpn traps instead.
+// DEMO ONLY: this requirement is NOT in the original task (written by Claude to show a failing witness).
+// rpn traps on Int overflow, which is normal Dovod behavior; the task said nothing about overflow.
 fn w_overflow() -> Bool
   ex w_overflow()
 {

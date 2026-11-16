@@ -86,8 +86,11 @@ $ dovod trust examples/witness/rpn.dv --witness examples/witness/rpn_witness.dv
     examples/witness/rpn_witness.dv:52: example trapped: `w_overflow()` — integer overflow in + (at rpn.dv:31)
 ```
 
-`rpn` was written by glm-5.3 in the exam below and passes all 12 of its own examples; the witness found
-that it traps on overflow instead of returning `none`.
+This is a demonstration of what a failing witness looks like, **not a bug found in glm's code**. `rpn` was
+written by glm-5.3 in the exam below and meets its task (hidden tests 8/8). The witness file, including
+the failing example, was written by Claude — so it is not an independent author — and that example adds a
+requirement the task never stated ("overflow gives `none`"); trapping on overflow is normal Dovod behavior.
+A real witness comes from someone else and checks what the task actually asks.
 
 ## Exam: a model that has never seen Dovod
 
