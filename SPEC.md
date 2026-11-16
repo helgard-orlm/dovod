@@ -19,7 +19,7 @@ you can write Dovod. Files end in `.dv`. The compiler emits C and builds a nativ
 ## Program shape
 
 ```
-use "other.dv"                       // include another file's items (path relative to this file)
+use "other.dv"                       // include another file's items (path relative to this file; its `main` is skipped)
 use video                            // bring in a module (see Modules)
 const pi: Float = 3.14159            // constants: literal Int, Float, Bool or Text only
 

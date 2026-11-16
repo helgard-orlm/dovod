@@ -77,6 +77,8 @@ def load(path):
                     sub = os.path.join(os.path.dirname(p), it.path)
                     one(sub, os.path.join(os.path.dirname(shown), it.path), it)
                 continue
+            if at is not None and not mod and it.k == 'Fn' and it.name == 'main':
+                continue   # a used file's `main` is dead code: the program's own `main` is the program
             it.module = mod
             if it.k == 'Effect':
                 modules[mod]['effects'][it.name] = it.doc

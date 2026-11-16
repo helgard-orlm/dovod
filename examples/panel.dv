@@ -1,0 +1,41 @@
+// The player's control panel alone, on a pretend file — a stand for looks and for testing the
+// panel on any machine (the real player needs Windows for its video window).  The `video` effect
+// is never called, so nothing traps on this target.
+// Run:   DOVOD_UI_NOWINDOW=1 bin/dovod run examples/panel.dv    then open the printed URL.
+use "player.dv"
+use ui
+
+fn main() uses io, clock, ui {
+  match ui_listen(0, false) {
+    none => { trap("панель: не удалось открыть порт") }
+    some(port) => { print("Панель: http://127.0.0.1:" + show(port) + "/") }
+  }
+  ui_window("Панель Dovod Player (стенд)")
+  var p = new_player(["C:\\v\\кино 1.avi", "C:\\v\\ролик 2.mp4", "C:\\v\\отпуск 2026.mkv"]) with { idx: 0 }
+  let t0 = now_ms()
+  while true {
+    let now = now_ms()
+    let fake_pos = (now - t0) % 600000            // a pretend 10-minute file, playing
+    ui_show(view(p, fake_pos, 600000, now))
+    match ui_next() {
+      UiTick => { }
+      UiOpened => { }
+      UiClosed => { }
+      UiClick(id) => {
+        match id {
+          "play" => { p = toggle_pause(p).p }
+          "mute" => { p = toggle_mute(p, now).p }
+          else => { }
+        }
+      }
+      UiChange(id, value) => {
+        if id == "vol" {
+          match parse_int(value) {
+            some(v) => { p = set_volume(p, v, now).p }
+            none => { }
+          }
+        }
+      }
+    }
+  }
+}

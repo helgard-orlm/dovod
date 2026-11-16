@@ -37,6 +37,21 @@ echo "$out" | grep -q '42 ABC some("x") none one,two 50 5.0 DemoReading(id: 7, l
 (cd tests/mod && ../../bin/dovod trust prog.dv) | grep -q "module demo: 6 native function(s) (11 lines of C" || { echo "FAIL: ledger module line"; fail=1; }
 bin/dovod check dovod/modules/video/video.dv >/dev/null 2>&1 || { echo "FAIL: module video does not check on its own"; fail=1; }
 bin/dovod spec video | grep -q "need pct >= 25 and pct <= 400" || { echo "FAIL: spec video"; fail=1; }
+# module ui: checks on its own, its example program checks, and the served page works end to end
+bin/dovod check dovod/modules/ui/ui.dv >/dev/null 2>&1 || { echo "FAIL: module ui does not check on its own"; fail=1; }
+bin/dovod check examples/prices.dv >/dev/null 2>&1 || { echo "FAIL: prices.dv (ui example)"; fail=1; }
+bin/dovod spec ui | grep -q "show a window or page" || { echo "FAIL: spec ui"; fail=1; }
+t2=$(mktemp -d)
+bin/dovod build tests/ui_serve.dv -o "$t2/serve" >/dev/null 2>&1 || { echo "FAIL: build tests/ui_serve.dv"; fail=1; }
+if [ -x "$t2/serve" ]; then
+  DOVOD_UI_NOWINDOW=1 "$t2/serve" & upid=$!
+  sleep 1
+  curl -s http://127.0.0.1:8471/ | grep -q "<!doctype html>" || { echo "FAIL: ui page not served"; fail=1; }
+  curl -s -X POST --data-binary 'click:quit
+0' http://127.0.0.1:8471/event >/dev/null || { echo "FAIL: /event not accepted"; fail=1; }
+  wait $upid || { echo "FAIL: ui_serve did not exit after the click"; fail=1; }
+fi
+rm -rf "$t2"
 bin/dovod trust tests/bad/evidence.dv | grep -q "affects: norm, main" || { echo "FAIL: trust ledger"; fail=1; }
 out=$(bin/dovod check tests/vacuous/a_vacuous.dv 2>&1)
 [ "$(echo "$out" | grep -c E-VACUOUS)" = 4 ] || { echo "FAIL: acceptance A (vacuous examples) not all flagged"; fail=1; }
@@ -51,7 +66,8 @@ if command -v x86_64-w64-mingw32-gcc >/dev/null; then  # cross builds: a Windows
   t=$(mktemp -d)
   bin/dovod build examples/player.dv --target win64 -o "$t/p" >/dev/null 2>&1 && file "$t/p.exe" | grep -q "(GUI), x86-64" || { echo "FAIL: win64 build of player.dv"; fail=1; }
   bin/dovod build examples/wordfreq.dv --target win32 -o "$t/w" >/dev/null 2>&1 && file "$t/w.exe" | grep -q "(console), Intel i386" || { echo "FAIL: win32 build of wordfreq.dv"; fail=1; }
-  rm -f "$t"/p.exe "$t"/w.exe; rmdir "$t"
+  bin/dovod build examples/prices.dv --target win64 -o "$t/pr" >/dev/null 2>&1 || { echo "FAIL: win64 build of prices.dv (ui on Windows)"; fail=1; }
+  rm -f "$t"/p.exe "$t"/w.exe "$t"/pr.exe; rmdir "$t"
 fi
 [ $fail = 0 ] && echo "all tests passed"
 exit $fail

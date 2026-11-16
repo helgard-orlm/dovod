@@ -126,6 +126,13 @@ tests/run.sh                                # compiler self-test (incl. ASan/UBS
 
 The full language is in [SPEC.md](SPEC.md) — designed to be read once, in one context window.
 
+## Modules
+
+The core stays one page; everything task-specific is a module (`dovod modules` lists them, `dovod spec NAME` prints a module's page):
+
+- **`video`** — play media files in a window (Windows, Media Foundation; the .exe needs no DLLs). The program owns the loop: `video_next()` returns one event at a time, and the effects of `main` remain the whole truth about what the program can touch.
+- **`ui`** — a window (or a page served to the local network) with buttons, fields and tables, drawn by the user's web browser; the page is served by the program itself, one exe, no DLLs. The whole screen is a *value*: `fn view(model) -> UiNode` and `fn update(model, ev) -> Model` are pure functions that carry examples — the browser is only a renderer. `examples/prices.dv` is a small window program on it; `examples/player.dv` uses both modules (video window + control panel).
+
 ## Speed
 
 `examples/bench.dv` vs the same code in `examples/bench.py` (Python 3.13), Intel N100, one run, all Dovod checks (overflow, bounds, contracts) on:

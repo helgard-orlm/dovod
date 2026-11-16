@@ -97,10 +97,15 @@ static void STDMETHODCALLTYPE dv_cb_event(IMFPMediaPlayerCallback* This, MFP_EVE
     }
     if (ev->eEventType == MFP_EVENT_TYPE_MEDIAITEM_SET) {
         IMFPMediaItem* item = NULL; BOOL has = FALSE, sel = FALSE;
+        BOOL ha = FALSE, hasel = FALSE;
         if (dv_vplayer && SUCCEEDED(IMFPMediaPlayer_GetMediaItem(dv_vplayer, &item)) && item) {
-            IMFPMediaItem_HasVideo(item, &has, &sel); IMFPMediaItem_Release(item);
+            IMFPMediaItem_HasVideo(item, &has, &sel);
+            IMFPMediaItem_HasAudio(item, &ha, &hasel);   // DOVOD_VIDEO_LOG shows whether Windows even selects this file's audio stream
+            IMFPMediaItem_Release(item);
         }
+        { char b[128]; snprintf(b, sizeof b, "streams: video=%d(sel %d) audio=%d(sel %d)", (int)has, (int)sel, (int)ha, (int)hasel); dv_vlog(b, 0); }
         dv_vhasvideo = has && sel;
+        if (!ha || !hasel) dv_vpush("noaudio");   // the program can tell the listener
         dv_vpaused = 0; dv_vplay_label();
         dv_vapply();
         if (dv_varea) InvalidateRect(dv_varea, NULL, TRUE);

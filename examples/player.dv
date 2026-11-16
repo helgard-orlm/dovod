@@ -3,10 +3,13 @@
 // Use:    player.exe [FILES...]   or drag files into the window, or press O.
 //
 // Playback itself is done by Windows (Media Foundation) through the `video` effect.
-// Everything the player DECIDES — keys, playlist, seeking, volume, the status line — is pure,
+// The CONTROL PANEL is a web page served by the program itself through the `ui` effect
+// (opens as a browser app window; MPC-style dark theme).  Everything the player DECIDES —
+// keys, clicks, the panel, the playlist, seeking, volume, the status line — is pure,
 // exampled code below; `main` only carries events in and commands out.
 
 use video
+use ui
 
 record Player {
   files: List[Text]
@@ -19,6 +22,8 @@ record Player {
   rate: Int         // speed in percent, 25..400
   note: Text        // a message in the status line…
   note_until: Int   // …shown until this clock time (ms)
+  seek: Int         // a seek asked for by the panel but not sent yet; -1 = none
+  seek_at: Int      // when the panel last moved the seek slider (ms)
   quit: Bool
 }
 
@@ -36,12 +41,16 @@ enum Cmd {
 
 record Step { p: Player, cmds: List[Cmd] }
 
-
 const seek_small: Int = 5000
 const seek_big: Int = 60000
 const vol_step: Int = 5
 const note_ms: Int = 4000
+const seek_wait: Int = 400        // the panel's seek is sent this long after the slider goes quiet
 const help: Text = "Пробел пауза · ←→ 5 с, Shift 1 мин · 0–9 доля · ↑↓ громкость · M звук · [ ] скорость · F экран · N/P файлы · O открыть · Q выход"
+
+// The panel's dark theme.  `ui` draws the page from one fixed stylesheet; a program overrides
+// it with a UiHtml <style> node — looks are outside the evidence, decisions are not.
+const theme: Text = "<style>\n:root{--bg:#101214;--fg:#e6e8ea;--mut:#8b9299;--card:#191d22;--line:#2b3137;--acc:#4f8cff;--accfg:#fff}\nbody{margin:0;background:var(--bg);color:var(--fg);font:14px/1.35 system-ui,'Segoe UI',Roboto,sans-serif}\n#app{max-width:1100px;margin:0 auto;padding:10px 12px}\n.col{gap:8px}\n.row{gap:8px}\nh2{font-size:16px}\np{margin:0;font-size:13px;color:var(--mut);white-space:pre-wrap}\nbutton{font:inherit;font-size:15px;padding:5px 13px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}\nbutton:hover{border-color:var(--acc)}\nbutton:active{background:var(--acc);color:var(--accfg)}\ninput[type=text],select{font:inherit;padding:5px 9px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);min-width:60px}\ninput:focus,select:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}\nlabel{display:inline-flex;gap:6px;align-items:center}\nfieldset{border:1px solid var(--line);border-radius:8px;background:var(--card);padding:8px 10px;margin:0;min-width:0}\nlegend{padding:0 6px;color:var(--mut);font-size:12px}\ntable{border-collapse:collapse;width:100%}\nth,td{text-align:left;padding:4px 10px;border-bottom:1px solid var(--line)}\nth{color:var(--mut);font-weight:600;font-size:12px}\ntable button{width:100%;text-align:left;background:transparent;border-color:transparent;color:var(--fg);padding:4px 10px;font-weight:400}\ntable button:hover{border-color:var(--acc)}\nprogress{width:100%;height:14px;accent-color:var(--acc)}\ninput[type=range]{flex:1;min-width:160px;accent-color:var(--acc)}\n.sv{display:none}\n#off{background:#b42318}\n</style>"
 
 // ---------------------------------------------------------------- small pieces
 
@@ -103,6 +112,51 @@ fn rate_text(pct: Int) -> Text
   return whole + "." + pad2(frac)
 }
 
+// the panel's speed menu: "0.5" -> 50 percent
+fn rate_of(t: Text) -> Opt[Int]
+  ex rate_of("1") == some(100)
+  ex rate_of("0.5") == some(50)
+  ex rate_of("1.25") == some(125)
+  ex rate_of("0.25") == some(25)
+  ex rate_of("4") == some(400)
+  ex rate_of("") == none
+  ex rate_of("x") == none
+  ex rate_of("1.2.3") == none
+  ex rate_of("1.x") == none
+  ex rate_of("e.5") == none
+{
+  let parts = split(t, ".")
+  if len(parts) == 1 {
+    match parse_int(parts[0]) {
+      none => { return none }
+      some(w) => { return some(w * 100) }
+    }
+  }
+  if len(parts) != 2 {
+    return none
+  }
+  match parse_int(parts[0]) {
+    none => { return none }
+    some(w) => {
+      match parse_int(parts[1]) {
+        none => { return none }
+        some(f) => {
+          if len(parts[1]) == 1 {
+            return some(w * 100 + f * 10)
+          }
+          return some(w * 100 + f)
+        }
+      }
+    }
+  }
+}
+
+fn rate_options() -> List[Text]
+  ex rate_options() == ["0.25", "0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4"]
+{
+  return ["0.25", "0.5", "0.75", "1", "1.25", "1.5", "2", "3", "4"]
+}
+
 fn base_name(path: Text) -> Text
   ex base_name("C:\\Video\\кино.mp4") == "кино.mp4"
   ex base_name("/home/a/b.mkv") == "b.mkv"
@@ -123,10 +177,10 @@ fn base_name(path: Text) -> Text
 
 fn new_player(files: List[Text]) -> Player
   ex new_player(["a.mp4"]) == Player(files: ["a.mp4"], idx: -1, paused: false, ended: false, vol: 100, muted: false,
-                                     full: false, rate: 100, note: "", note_until: 0, quit: false)
+                                     full: false, rate: 100, note: "", note_until: 0, seek: -1, seek_at: 0, quit: false)
 {
   return Player(files: files, idx: -1, paused: false, ended: false, vol: 100, muted: false, full: false,
-                rate: 100, note: "", note_until: 0, quit: false)
+                rate: 100, note: "", note_until: 0, seek: -1, seek_at: 0, quit: false)
 }
 
 // test fixture: a player with two files, the first one playing
@@ -169,6 +223,7 @@ fn seek_by(p: Player, delta: Int, pos: Int, dur: Int) -> Step
   ex seek_by(playing(), delta: 60000, pos: 30000, dur: 60000).cmds == [Seek(ms: 59000)]
   ex seek_by(playing(), delta: 5000, pos: 1000, dur: 0).cmds == [Seek(ms: 6000)]
   ex seek_by(playing(), delta: 5000, pos: 100, dur: 500).cmds == [Seek(ms: 0)]
+  ex seek_by(playing(), delta: 5000, pos: 100, dur: 1).cmds == [Seek(ms: 0)]
   ex seek_by(playing() with { ended: true }, delta: -5000, pos: 9000, dur: 9000).p == playing()
 {
   var target = max(pos + delta, 0)
@@ -176,6 +231,31 @@ fn seek_by(p: Player, delta: Int, pos: Int, dur: Int) -> Step
     target = min(target, max(dur - 1000, 0))
   }
   return Step(p: p with { ended: false }, cmds: [Seek(ms: target)])
+}
+
+// the panel's seek: wait for the slider to go quiet, then send it once
+fn pump_seek(p: Player, dur: Int, now: Int) -> Step
+  ex pump_seek(playing(), 600000, 0).cmds == []
+  ex pump_seek(playing() with { seek: 30000, seek_at: 1000 }, 600000, 1399).cmds == []
+  ex pump_seek(playing() with { seek: 30000, seek_at: 1000 }, 600000, 1400).cmds == [Seek(ms: 30000)]
+  ex pump_seek(playing() with { seek: 30000, seek_at: 1000 }, 600000, 1400).p.seek == -1
+  ex pump_seek(playing() with { seek: 700000, seek_at: 0 }, 600000, 500).cmds == [Seek(ms: 599000)]
+  ex pump_seek(playing() with { seek: 7000, seek_at: 0 }, 0, 500).cmds == [Seek(ms: 7000)]
+  ex pump_seek(playing() with { seek: 7000, seek_at: 0 }, 1, 500).cmds == [Seek(ms: 0)]
+  ex pump_seek(playing() with { seek: 0, seek_at: 0 }, 600000, 500).cmds == [Seek(ms: 0)]
+  ex pump_seek(playing() with { seek: 30000, seek_at: 0, ended: true }, 600000, 500).p == playing()
+{
+  if p.seek < 0 {
+    return Step(p: p, cmds: [])
+  }
+  if now - p.seek_at < seek_wait {
+    return Step(p: p, cmds: [])
+  }
+  var target = p.seek
+  if dur > 0 {
+    target = min(target, max(dur - 1000, 0))
+  }
+  return Step(p: p with { seek: -1, ended: false }, cmds: [Seek(ms: target)])
 }
 
 fn set_volume(p: Player, vol: Int, now: Int) -> Step
@@ -218,6 +298,19 @@ fn set_full(p: Player, on: Bool) -> Step
   ex set_full(playing(), true) == Step(p: playing() with { full: true }, cmds: [Full(on: true)])
 {
   return Step(p: p with { full: on }, cmds: [Full(on: on)])
+}
+
+fn toggle_mute(p: Player, now: Int) -> Step
+  ex toggle_mute(playing(), 0).cmds == [Mute(on: true)]
+  ex toggle_mute(playing(), 0).p.muted == true
+  ex toggle_mute(playing() with { muted: true }, 5).cmds == [Mute(on: false)]
+  ex toggle_mute(playing() with { muted: true }, 5).p.note == "Звук включён"
+{
+  var msg = "Звук включён"
+  if not p.muted {
+    msg = "Звук выключен"
+  }
+  return Step(p: with_note(p, msg, now) with { muted: not p.muted }, cmds: [Mute(on: not p.muted)])
 }
 
 fn go(p: Player, delta: Int, now: Int) -> Step
@@ -281,13 +374,7 @@ fn on_key(p: Player, key: Text, pos: Int, dur: Int, now: Int) -> Step
     "HOME" => { return seek_by(p, delta: -pos, pos: pos, dur: dur) }
     "UP" => { return set_volume(p, p.vol + vol_step, now) }
     "DOWN" => { return set_volume(p, p.vol - vol_step, now) }
-    "M" => {
-      var msg = "Звук включён"
-      if not p.muted {
-        msg = "Звук выключен"
-      }
-      return Step(p: with_note(p, msg, now) with { muted: not p.muted }, cmds: [Mute(on: not p.muted)])
-    }
+    "M" => { return toggle_mute(p, now) }
     "]" => { return set_rate(p, p.rate + 25, now) }
     "[" => { return set_rate(p, p.rate - 25, now) }
     "BACKSPACE" => { return set_rate(p, 100, now) }
@@ -323,6 +410,8 @@ fn on_event(p: Player, ev: VideoEv, pos: Int, dur: Int, now: Int) -> Step
   ex on_event(playing(), VideoDrop(paths: ["D:\\new.mp4"]), 0, 0, 0).p.files == ["D:\\new.mp4"]
   ex on_event(playing() with { paused: true, ended: true }, VideoLoaded, 0, 0, 0).p == playing()
   ex on_event(playing(), VideoEnded, 0, 0, 0).p.idx == 1
+  ex on_event(playing(), VideoNoAudio, 0, 0, 5).p ==
+     playing() with { note: "Windows не выбрала аудиопоток — кодек не декодируется?", note_until: 4005 }
   ex on_event(playing() with { idx: 1 }, VideoEnded, 0, 0, 5).p ==
      playing() with { idx: 1, ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: 3600005 }
   ex on_event(playing(), VideoClosed, 0, 0, 0).p.quit == true
@@ -347,8 +436,247 @@ fn on_event(p: Player, ev: VideoEv, pos: Int, dur: Int, now: Int) -> Step
       return Step(p: p with { ended: true, paused: true, note: "Конец. Пробел — сначала", note_until: now + 1000 * 3600 },
                   cmds: [])
     }
+    VideoNoAudio => {
+      return Step(p: with_note(p, "Windows не выбрала аудиопоток — кодек не декодируется?", now), cmds: [])
+    }
     VideoClosed => { return Step(p: p with { quit: true }, cmds: []) }
-    VideoFailed(msg) => { return Step(p: p with { note: "Ошибка: " + msg, note_until: now + 3 * note_ms }, cmds: []) }
+    VideoFailed(msg) => { return Step(p: with_note(p, "Ошибка: " + msg, now) with { note_until: now + 3 * note_ms }, cmds: []) }
+  }
+}
+
+// ---------------------------------------------------------------- the panel (a pure function of the state)
+
+fn play_label(p: Player) -> Text
+  ex play_label(playing()) == "⏸"
+  ex play_label(playing() with { paused: true }) == "▶"
+  ex play_label(playing() with { ended: true }) == "▶"
+  ex play_label(new_player([])) == "▶"
+{
+  if p.idx >= 0 and not p.paused and not p.ended {
+    return "⏸"
+  }
+  return "▶"
+}
+
+fn mute_label(p: Player) -> Text
+  ex mute_label(playing()) == "🔊"
+  ex mute_label(playing() with { muted: true }) == "🔇"
+{
+  if p.muted {
+    return "🔇"
+  }
+  return "🔊"
+}
+
+fn vol_label(p: Player) -> Text
+  ex vol_label(playing()) == "100%"
+  ex vol_label(playing() with { vol: 7 }) == "7%"
+{
+  return show(p.vol) + "%"
+}
+
+fn time_text(pos: Int, dur: Int) -> Text
+  ex time_text(65000, 600000) == "1:05 / 10:00"
+  ex time_text(700000, 600000) == "10:00 / 10:00"
+  ex time_text(65000, 0) == "1:05"
+  ex time_text(65000, 1) == "0:00 / 0:00"
+  ex time_text(0, 0) == "0:00"
+{
+  if dur > 0 {
+    return fmt_time(min(pos, dur)) + " / " + fmt_time(dur)
+  }
+  return fmt_time(pos)
+}
+
+fn slider_pos(pos: Int, dur: Int) -> Int
+  ex slider_pos(65000, 600000) == 65000
+  ex slider_pos(700000, 600000) == 600000
+  ex slider_pos(-5, 600000) == 0
+  ex slider_pos(5, 1) == 1
+  ex slider_pos(123, 0) == 0
+{
+  if dur <= 0 {
+    return 0
+  }
+  return clamp(pos, 0, dur)
+}
+
+// the one-line message under the controls: a fresh note, or a hint when nothing is open
+fn panel_note(p: Player, now: Int) -> Text
+  ex panel_note(playing(), 0) == ""
+  ex panel_note(with_note(playing(), "Громкость 40%", now: 1000), 2000) == "Громкость 40%"
+  ex panel_note(with_note(playing(), "Громкость 40%", now: 1000), 6000) == ""
+  ex panel_note(new_player([]), 0) == "Перетащите видео в окно плеера или нажмите «Открыть»"
+{
+  if now < p.note_until {
+    return p.note
+  }
+  if p.idx < 0 {
+    return "Перетащите видео в окно плеера или нажмите «Открыть»"
+  }
+  return ""
+}
+
+fn file_label(p: Player, i: Int) -> Text
+  need i >= 0 and i < len(p.files)
+  ex file_label(playing(), 0) == "▶ one.mp4"
+  ex file_label(playing(), 1) == "two.mkv"
+  ex file_label(playing() with { idx: 1 }, 1) == "▶ two.mkv"
+{
+  var t = base_name(p.files[i])
+  if i == p.idx {
+    t = "▶ " + t
+  }
+  return t
+}
+
+fn playlist_rows(p: Player) -> List[UiNode]
+  ex playlist_rows(playing()) == [UiButton(id: "file", arg: 0, label: "▶ one.mp4"),
+                                  UiButton(id: "file", arg: 1, label: "two.mkv")]
+  ex playlist_rows(new_player([])) == []
+{
+  var rows: List[UiNode] = []
+  for i in 0..len(p.files) {
+    rows.push(UiButton(id: "file", arg: i, label: file_label(p, i)))
+  }
+  return rows
+}
+
+fn playlist_box(p: Player) -> UiNode
+  ex playlist_box(playing()) == UiBox(title: "Плейлист", kids: [UiTable(head: ["Файл"], rows: playlist_rows(playing()))])
+  ex playlist_box(new_player([])) == UiBox(title: "Плейлист", kids: [UiText(text: "Пусто — перетащите видео в окно плеера")])
+{
+  var kids: List[UiNode] = [UiTable(head: ["Файл"], rows: playlist_rows(p))]
+  if len(p.files) == 0 {
+    kids = [UiText(text: "Пусто — перетащите видео в окно плеера")]
+  }
+  return UiBox(title: "Плейлист", kids: kids)
+}
+
+// the whole panel: what is on screen is a pure function of the player's state
+fn view(p: Player, pos: Int, dur: Int, now: Int) -> UiNode
+  ex view(playing(), 65000, 600000, 0) == UiCol(kids: [
+      UiHtml(html: theme),
+      UiRow(kids: [UiButton(id: "prev", arg: 0, label: "⏮"),
+                   UiButton(id: "play", arg: 0, label: "⏸"),
+                   UiButton(id: "next", arg: 0, label: "⏭"),
+                   UiSlider(id: "seek", arg: 0, value: 65000, lo: 0, hi: 600000),
+                   UiText(text: "1:05 / 10:00")]),
+      UiRow(kids: [UiButton(id: "mute", arg: 0, label: "🔊"),
+                   UiSlider(id: "vol", arg: 0, value: 100, lo: 0, hi: 100),
+                   UiText(text: "100%"),
+                   UiSelect(id: "rate", arg: 0, value: "1", options: rate_options()),
+                   UiButton(id: "full", arg: 0, label: "⛶"),
+                   UiButton(id: "open", arg: 0, label: "Открыть…")]),
+      UiText(text: ""),
+      playlist_box(playing())])
+  ex view(new_player([]), 0, 0, 0) == UiCol(kids: [
+      UiHtml(html: theme),
+      UiRow(kids: [UiButton(id: "prev", arg: 0, label: "⏮"),
+                   UiButton(id: "play", arg: 0, label: "▶"),
+                   UiButton(id: "next", arg: 0, label: "⏭"),
+                   UiSlider(id: "seek", arg: 0, value: 0, lo: 0, hi: 1),
+                   UiText(text: "0:00")]),
+      UiRow(kids: [UiButton(id: "mute", arg: 0, label: "🔊"),
+                   UiSlider(id: "vol", arg: 0, value: 100, lo: 0, hi: 100),
+                   UiText(text: "100%"),
+                   UiSelect(id: "rate", arg: 0, value: "1", options: rate_options()),
+                   UiButton(id: "full", arg: 0, label: "⛶"),
+                   UiButton(id: "open", arg: 0, label: "Открыть…")]),
+      UiText(text: "Перетащите видео в окно плеера или нажмите «Открыть»"),
+      playlist_box(new_player([]))])
+{
+  return UiCol(kids: [
+    UiHtml(html: theme),
+    UiRow(kids: [UiButton(id: "prev", arg: 0, label: "⏮"),
+                 UiButton(id: "play", arg: 0, label: play_label(p)),
+                 UiButton(id: "next", arg: 0, label: "⏭"),
+                 UiSlider(id: "seek", arg: 0, value: slider_pos(pos, dur), lo: 0, hi: max(dur, 1)),
+                 UiText(text: time_text(pos, dur))]),
+    UiRow(kids: [UiButton(id: "mute", arg: 0, label: mute_label(p)),
+                 UiSlider(id: "vol", arg: 0, value: p.vol, lo: 0, hi: 100),
+                 UiText(text: vol_label(p)),
+                 UiSelect(id: "rate", arg: 0, value: rate_text(p.rate), options: rate_options()),
+                 UiButton(id: "full", arg: 0, label: "⛶"),
+                 UiButton(id: "open", arg: 0, label: "Открыть…")]),
+    UiText(text: panel_note(p, now)),
+    playlist_box(p)])
+}
+
+// what a panel click or a slider change does
+fn on_ui(p: Player, ev: UiEv, now: Int) -> Step
+  ex on_ui(playing(), UiTick, 0).cmds == []
+  ex on_ui(playing(), UiOpened, 0).cmds == []
+  ex on_ui(playing(), UiClosed, 0).cmds == []            // a closed panel is not the player's end
+  ex on_ui(playing(), UiClick(id: "play", arg: 0), 0).cmds == [Pause(on: true)]
+  ex on_ui(playing() with { paused: true }, UiClick(id: "play", arg: 0), 0).cmds == [Pause(on: false)]
+  ex on_ui(playing(), UiClick(id: "prev", arg: 0), 0).p.note == "Это первый файл"
+  ex on_ui(playing() with { files: ["a", "b", "c"], idx: 2 }, UiClick(id: "prev", arg: 0), 0).p.idx == 1
+  ex on_ui(playing(), UiClick(id: "next", arg: 0), 0).p.idx == 1
+  ex on_ui(playing(), UiClick(id: "file", arg: 1), 0).cmds == [Open(path: "C:\\v\\two.mkv"), Title(text: "two.mkv — Dovod Player")]
+  ex on_ui(playing(), UiClick(id: "file", arg: 0), 0).cmds == [Open(path: "C:\\v\\one.mp4"), Title(text: "one.mp4 — Dovod Player")]
+  ex on_ui(playing(), UiClick(id: "file", arg: 9), 0).cmds == []
+  ex on_ui(new_player([]), UiClick(id: "file", arg: 0), 0).cmds == []
+  ex on_ui(playing(), UiClick(id: "open", arg: 0), 0).cmds == [Pick]
+  ex on_ui(playing(), UiClick(id: "full", arg: 0), 0).cmds == [Full(on: true)]
+  ex on_ui(set_full(playing(), true).p, UiClick(id: "full", arg: 0), 0).cmds == [Full(on: false)]
+  ex on_ui(playing(), UiClick(id: "mute", arg: 0), 0).cmds == [Mute(on: true)]
+  ex on_ui(playing() with { muted: true }, UiClick(id: "mute", arg: 0), 0).cmds == [Mute(on: false)]
+  ex on_ui(playing(), UiClick(id: "nope", arg: 0), 0).cmds == []
+  ex on_ui(playing(), UiChange(id: "seek", arg: 0, value: "123456"), 1000).p ==
+     playing() with { seek: 123456, seek_at: 1000 }
+  ex on_ui(playing(), UiChange(id: "seek", arg: 0, value: "x"), 1000).p == playing()
+  ex on_ui(playing(), UiChange(id: "vol", arg: 0, value: "73"), 1000).cmds == [Volume(pct: 73), Mute(on: false)]
+  ex on_ui(playing(), UiChange(id: "vol", arg: 0, value: "x"), 1000).cmds == []
+  ex on_ui(playing(), UiChange(id: "rate", arg: 0, value: "1.5"), 1000).cmds == [Rate(pct: 150)]
+  ex on_ui(playing(), UiChange(id: "rate", arg: 0, value: "9"), 1000).cmds == [Rate(pct: 400)]
+  ex on_ui(playing(), UiChange(id: "rate", arg: 0, value: "x"), 1000).cmds == []
+  ex on_ui(playing(), UiChange(id: "other", arg: 0, value: "1"), 0).cmds == []
+{
+  match ev {
+    UiTick => { return Step(p: p, cmds: []) }
+    UiOpened => { return Step(p: p, cmds: []) }
+    UiClosed => { return Step(p: p, cmds: []) }
+    UiClick(id, arg) => {
+      match id {
+        "play" => { return toggle_pause(p) }
+        "prev" => { return go(p, -1, now) }
+        "next" => { return go(p, 1, now) }
+        "full" => { return set_full(p, not p.full) }
+        "mute" => { return toggle_mute(p, now) }
+        "open" => { return Step(p: p, cmds: [Pick]) }
+        "file" => {
+          if arg >= 0 and arg < len(p.files) {
+            return open_at(p, arg)
+          }
+          return Step(p: p, cmds: [])
+        }
+        else => { return Step(p: p, cmds: []) }
+      }
+    }
+    UiChange(id, value) => {
+      match id {
+        "seek" => {
+          match parse_int(value) {
+            some(ms) => { return Step(p: p with { seek: ms, seek_at: now }, cmds: []) }
+            none => { return Step(p: p, cmds: []) }
+          }
+        }
+        "vol" => {
+          match parse_int(value) {
+            some(v) => { return set_volume(p, v, now) }
+            none => { return Step(p: p, cmds: []) }
+          }
+        }
+        "rate" => {
+          match rate_of(value) {
+            some(r) => { return set_rate(p, r, now) }
+            none => { return Step(p: p, cmds: []) }
+          }
+        }
+        else => { return Step(p: p, cmds: []) }
+      }
+    }
   }
 }
 
@@ -428,8 +756,15 @@ fn apply(cmds: List[Cmd]) -> Text uses video {
   return back
 }
 
-fn main() uses env, clock, video {
+fn main() uses io, env, clock, video, ui {
   video_title("Dovod Player")
+  match ui_listen(0, false) {          // 0 = any free port; the panel is served to this machine only
+    none => { trap("панель: не удалось открыть порт") }
+    some(port) => {
+      print("Панель: http://127.0.0.1:" + show(port) + "/")
+    }
+  }
+  ui_window("Dovod Player — панель")
   let first = start(new_player(args()))
   var p = first.p
   var pending = apply(first.cmds)
@@ -438,9 +773,25 @@ fn main() uses env, clock, video {
     if pending == "" {
       ev = video_next()
     }
-    let s = on_event(p, ev, video_pos(), video_len(), now_ms())
+    let pos = video_pos()
+    let dur = video_len()
+    let now = now_ms()
+    let s = on_event(p, ev, pos, dur, now)
     p = s.p
     pending = apply(s.cmds)
+    let uev = ui_next()
+    if uev != UiTick {
+      let su = on_ui(p, uev, now)
+      p = su.p
+      let back = apply(su.cmds)
+      if back != "" {
+        pending = back
+      }
+    }
+    let sp = pump_seek(p, dur, now)
+    p = sp.p
+    let _sent = apply(sp.cmds)
     video_status(status(p, video_pos(), video_len(), now_ms()))
+    ui_show(view(p, video_pos(), video_len(), now_ms()))
   }
 }

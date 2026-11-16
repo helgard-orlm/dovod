@@ -1,0 +1,37 @@
+// End-to-end test of the `ui` module (used by tests/run.sh): build, serve the page, click through
+// the HTTP API, and the program must exit by itself.  The port is fixed on purpose.
+// Run by hand:   DOVOD_UI_NOWINDOW=1 bin/dovod run tests/ui_serve.dv   then open the printed port.
+use ui
+
+fn main() uses ui {
+  match ui_listen(8471, false) {
+    none => { trap("cannot open port 8471") }
+    some(_port) => { }
+  }
+  ui_window("ui serve test")
+  var last: Text = "—"
+  ui_show(UiCol(kids: [UiText(text: "событий ещё не было"),
+                       UiButton(id: "quit", arg: 0, label: "Выйти")]))
+  var quit = false
+  var i = 0
+  while not quit and i < 200 {          // 200 × 100 ms = 20 s, then it failed anyway
+    i = i + 1
+    match ui_next() {
+      UiTick => { }
+      UiOpened => { }
+      UiClosed => { }
+      UiClick(id) => {
+        if id == "quit" {
+          quit = true
+        }
+        last = "click " + id
+      }
+      UiChange(id, value) => { last = "change " + id + "=" + value }
+    }
+    ui_show(UiCol(kids: [UiText(text: "последнее: " + last),
+                         UiButton(id: "quit", arg: 0, label: "Выйти")]))
+  }
+  if not quit {
+    trap("no click came within 20 s")
+  }
+}

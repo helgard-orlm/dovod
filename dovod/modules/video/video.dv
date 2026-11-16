@@ -25,6 +25,7 @@ enum VideoEv {
   VideoDrop(paths: List[Text])    // files dropped on the window
   VideoLoaded                     // the opened file is ready and playing
   VideoEnded                      // the file played to its end
+  VideoNoAudio                    // the file opened, but Windows selected no audio stream (a codec it cannot decode?)
   VideoClosed                     // the window's close button
   VideoFailed(msg: Text)
 }
@@ -55,6 +56,7 @@ fn video_parse(ev: Text) -> VideoEv
   ex video_parse("drop:C:\\a.mp4\nC:\\b.mkv") == VideoDrop(paths: ["C:\\a.mp4", "C:\\b.mkv"])
   ex video_parse("loaded") == VideoLoaded
   ex video_parse("ended") == VideoEnded
+  ex video_parse("noaudio") == VideoNoAudio
   ex video_parse("closed") == VideoClosed
   ex video_parse("error:no decoder") == VideoFailed(msg: "no decoder")
   ex video_parse("something new") == VideoTick
@@ -75,6 +77,7 @@ fn video_parse(ev: Text) -> VideoEv
     "dblclick" => { return VideoDblClick }
     "loaded" => { return VideoLoaded }
     "ended" => { return VideoEnded }
+    "noaudio" => { return VideoNoAudio }
     "closed" => { return VideoClosed }
     else => { return VideoTick }   // unknown events are ignored: an older program keeps working
   }
