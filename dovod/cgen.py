@@ -351,6 +351,8 @@ class CGen:
                 c = self.alt(e, f"`{e.v}` becomes `{e.v + 1}`", c, f"INT64_C({e.v + 1})")
             return c, False
         if k == 'Float':
+            if e.v + 1.0 == e.v:   # too large for +1.0 to change it: no mutant
+                return repr(e.v), False
             return self.alt(e, f"`{e.v!r}` becomes `{e.v + 1.0!r}`", repr(e.v), repr(e.v + 1.0)), False
         if k == 'Bool':
             a, b = ('true', 'false') if e.v else ('false', 'true')
@@ -413,7 +415,9 @@ class CGen:
                 other = 'or' if op == 'and' else 'and'
                 return self.alt(e, f"`{op}` becomes `{other}`", f"({l} {a} {r})", f"({l} {b} {r})"), False
             x = self.plain('Bool', l)
-            self.emit(f"if ({'' if op == 'and' else '!'}{x}) {{")
+            cond = self.alt(e, f"`{op}` becomes `{'or' if op == 'and' else 'and'}`",
+                            x if op == 'and' else '!' + x, '!' + x if op == 'and' else x)
+            self.emit(f"if ({cond}) {{")
             self.buf.extend(rb)
             self.emit(f"{x} = {r};")
             self.emit("}")

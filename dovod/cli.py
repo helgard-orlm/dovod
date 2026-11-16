@@ -116,7 +116,8 @@ def analyse(path, run_examples=True):
             exe = os.path.join(tmp, 'test')
             compile_c(csrc, exe, '-O0')
             try:
-                out = subprocess.run([exe], capture_output=True, text=True, timeout=60, preexec_fn=big_stack)
+                out = subprocess.run([exe], capture_output=True, text=True, timeout=60,
+                                     preexec_fn=big_stack if os.name == 'posix' else None)
                 lines, crashed = out.stdout.splitlines(), out.returncode != 0
                 why = f"crashed (exit code {out.returncode}; e.g. stack overflow from deep recursion)"
             except subprocess.TimeoutExpired as ex:
@@ -172,6 +173,8 @@ def analyse(path, run_examples=True):
                         r['weak'].append(m)
             elif p[0] == 'BMSTOP':
                 res.bm_partial = True
+        if crashed and len(done) == len(gen.exs):
+            res.bm_partial = True   # every example ran; the crash/timeout was in the strength phase
         if crashed:
             for i, (fn, e) in enumerate(gen.exs):
                 if i not in done:
@@ -329,6 +332,9 @@ def cmd_trust(res, path, witness=None):
     print("  self-checked = agrees with its author's own examples: catches slips, not a misread task.")
     print("  strength     = how many small changes to the body (a number +1, `<` to `<=`, `+` to `-`, a removed")
     print("                 assignment...) make some example fail. `dovod weak FILE` lists the ones nothing notices.")
+    if res.bm_partial:
+        print("                 NOTE: the strength phase was cut short (time limit or a crash under a changed body):")
+        print("                 not every change was tried, the strength numbers above are incomplete.")
     print("  witnessed    = also passed examples written by someone else (--witness FILE).")
     print("  summary: " + ', '.join(f"{v} {k}" for k, v in cnt.items())
           + f". Unchecked shell = {shell} of {total} function lines ({100 * shell // max(total, 1)}%).")

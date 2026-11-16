@@ -83,6 +83,23 @@ fn span(lo: Int, hi: Int) -> Int
   return hi - lo
 }
 
+fn keep(p: Q) -> Text             // `with` on a local leaves the local untouched
+  ex keep(Q(a: 1, t: "x")) == "1x:5xy"
+{
+  var q = p
+  let r = q with { a: 5, t: q.t + "y" }
+  q.t = q.t + ""
+  return show(q.a) + q.t + ":" + show(r.a) + r.t
+}
+
+fn both(a: Bool, xs: List[Int]) -> Bool      // `and` whose right side needs statements
+  ex both(true, [1]) == true
+  ex both(true, []) == false
+  ex both(false, [1]) == false
+{
+  return a and len(xs + [0]) > 1
+}
+
 fn main() uses io {
   print(show(retag(bump(base()), "z")) + " " + show(kind("N")) + sign_name(0) + yes_no(span(lo: 1, hi: 2) == 1) + show(is_digit('5')))
 }

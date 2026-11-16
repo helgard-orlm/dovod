@@ -111,7 +111,9 @@ Rules:
 body, one at a time — an Int/Float literal +1, `true`↔`false`, `<`↔`<=`, `>`↔`>=`, `==`↔`!=`, `+`↔`-`,
 `and`↔`or`, a dropped `not`, a removed assignment or `.push`/`.pop` — and re-runs the examples that
 reach that function. A change is *noticed* if some example stops passing (a trap, a failed `need`/`give`
-or a run that takes 10× longer than the original also count). `check` prints the total, `trust` shows
+or a run that needs more than 10× the loop/call steps of the original plus 100000 also count). Not
+changed: Int literals ≥ 2^62, Float literals too large for +1.0 to matter, `*` `/` `%`, Text literals.
+The phase stops after 20 s; `check`, `weak` and `trust` then say that the numbers are incomplete. `check` prints the total, `trust` shows
 `noticed/tried` per function, and `dovod weak FILE` lists every unnoticed change with its line:
 `f.dv:19:3: W-WEAK: in \`tidy\` no example notices if this assignment is removed`. Each such line is a place
 where the code could be wrong and every example would still pass: add an example that pins it down, or
@@ -252,7 +254,7 @@ shells, whether the task was understood) — say so to the human instead of "all
 
 ## Not in 0.2 (deliberately small)
 
-Maps, generics, closures, modules with namespaces, Unicode-aware text indexing, a formatter, network
+(`with` became a keyword in 0.2.) Maps, generics, closures, modules with namespaces, Unicode-aware text indexing, a formatter, network
 and process effects, proofs beyond examples. Known gap: calls made only inside `ex`/`need`/`give` are not
 counted in the ledger's "rests on assumed".
 
