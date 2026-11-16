@@ -337,36 +337,9 @@ static dv_ble_hobj dv_ble_recv_obj, dv_ble_stop_obj;   // defined below, with th
 
 static ULONG  WINAPI dv_ble_h_add(void* self)  { (void)self; return 1; }   // static objects: never freed
 static ULONG  WINAPI dv_ble_h_rel(void* self)  { (void)self; return 1; }
-// the honest answer: a real array (the caller frees it with CoTaskMemFree). The old
-// "S_OK, count 0, pointer NULL" is legal COM — but their delivery code read through the
-// NULL (crash: read at 0x10), so no more empty answers.
-static HRESULT WINAPI dv_ble_h_iids(void* self, ULONG* n, IID** ids) {
-    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetIids asked"); }
-    if (!n || !ids) return E_POINTER;
-    IID* a = (IID*)CoTaskMemAlloc(sizeof(IID) * 4);
-    if (!a) { *n = 0; *ids = NULL; return E_OUTOFMEMORY; }
-    a[0] = dv_ble_iid_unknown;
-    a[1] = dv_ble_iid_inspect;
-    a[2] = (self == (void*)&dv_ble_recv_obj) ? dv_ble_iid_teh_recv : dv_ble_iid_teh_stop;
-    a[3] = dv_ble_iid_agile;
-    *n = 4;
-    *ids = a;
-    return S_OK;
-}
-static HRESULT WINAPI dv_ble_h_trust(void* self, TrustLevel* t) {
-    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetTrustLevel asked"); }
-    (void)self; if (t) *t = 0; return S_OK; }
-static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
-    (void)self;
-    if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) { dv_ble_say("seam: GetRuntimeClassName asked"); }
-    if (!out) return E_POINTER;
-    static const wchar_t n[] = L"Windows.Foundation.TypedEventHandler`2";
-    return WindowsCreateString(n, (UINT32)(sizeof n / 2 - 1), out);
-}
-
 static HRESULT WINAPI dv_ble_qi_recv(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
-    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
+    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) ||
                IsEqualIID(riid, &dv_ble_iid_teh_recv) || IsEqualIID(riid, &dv_ble_iid_agile);
     if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) {
         char w[96];
@@ -380,7 +353,7 @@ static HRESULT WINAPI dv_ble_qi_recv(void* self, REFIID riid, void** out) {
 
 static HRESULT WINAPI dv_ble_qi_stop(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
-    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) || IsEqualIID(riid, &dv_ble_iid_inspect) ||
+    bool hit = IsEqualIID(riid, &dv_ble_iid_unknown) ||
                IsEqualIID(riid, &dv_ble_iid_teh_stop) || IsEqualIID(riid, &dv_ble_iid_agile);
     if (dv_ble_qidbg > 0 && InterlockedDecrement(&dv_ble_qidbg) >= 0) {
         char w[96];
@@ -533,13 +506,16 @@ static HRESULT WINAPI dv_ble_stop_invoke(void* self, void* sender, void* args) {
     return S_OK;
 }
 
-static const void* dv_ble_recv_vt[7] = {
+// A WinRT delegate (TypedEventHandler) derives from IUnknown, NOT from IInspectable: its vtable is
+// QueryInterface, AddRef, Release, Invoke — four slots, Invoke at slot 3. (Until 16.11 these tables had
+// the three IInspectable methods in front of Invoke, so Windows "calling Invoke(sender, args)" ran our
+// GetIids(count*, ids**) with sender and args as its out-pointers and wrote into both objects:
+// first a crash inside Windows.Devices.Bluetooth.dll, then a hang.)
+static const void* dv_ble_recv_vt[4] = {
     (const void*)dv_ble_qi_recv, (const void*)dv_ble_h_add, (const void*)dv_ble_h_rel,
-    (const void*)dv_ble_h_iids, (const void*)dv_ble_h_name, (const void*)dv_ble_h_trust,
     (const void*)dv_ble_adv_invoke };
-static const void* dv_ble_stop_vt[7] = {
+static const void* dv_ble_stop_vt[4] = {
     (const void*)dv_ble_qi_stop, (const void*)dv_ble_h_add, (const void*)dv_ble_h_rel,
-    (const void*)dv_ble_h_iids, (const void*)dv_ble_h_name, (const void*)dv_ble_h_trust,
     (const void*)dv_ble_stop_invoke };
 static dv_ble_hobj dv_ble_recv_obj = { dv_ble_recv_vt };
 static dv_ble_hobj dv_ble_stop_obj = { dv_ble_stop_vt };
