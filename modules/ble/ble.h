@@ -180,10 +180,12 @@ static volatile LONG dv_ble_dbg = 5;    // the first N shouts leave a stderr tra
 
 // the start steps and the first events leave a trail; a hard crash says where it happened
 static void dv_ble_say(const char* what) {
+    EnterCriticalSection(&dv_ble_cs);
     fprintf(stderr, "ble: %s\n", what);
     fflush(stderr);
+    LeaveCriticalSection(&dv_ble_cs);
 }
-static LONG WINAPI dv_ble_crash(EXCEPTION_POINTERS* ep) {
+static LONG WINAPI dv_ble_crash(EXCEPTION_POINTERS* ep) {   // no cs here: the crash may hold it
     fprintf(stderr, "ble: CRASH code=%08lx addr=%p\n",
             ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0,
             ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionAddress : NULL);
@@ -199,6 +201,8 @@ static void dv_ble_ensure(void) {
         dv_ble_made = 1;
     }
 }
+
+static void dv_ble_say(const char* what);
 
 static void dv_ble_push(dv_text ev) {
     EnterCriticalSection(&dv_ble_cs);
@@ -406,9 +410,12 @@ static HRESULT WINAPI dv_ble_adv_invoke(void* self, void* sender, void* args) {
             }
         }
         if (!have_mfd) { dv_buf_puts(&b, "-"); }
+        if (dbg) { dv_ble_say("shout: manuf done"); }
 
         if (ad) { ((dv_ble_advVtbl*)*(void**)ad)->Release(ad); }
+        if (dbg) { dv_ble_say("shout: built"); }
         dv_ble_push(dv_buf_take(&b));
+        if (dbg) { dv_ble_say("shout: pushed"); }
     }
     dv_ble_leave();
     return S_OK;
@@ -445,6 +452,7 @@ static void dv_ble_scan_stop(void);
 static bool dv_ble_scan_start(bool active) {
     dv_ble_ensure();
     if (dv_ble_w) { dv_ble_scan_stop(); }            // restart cleanly (e.g. after a spontaneous "off")
+    dv_ble_ensure();
     dv_ble_say("scan_start");
     if (!dv_ble_ro) {
         HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -472,10 +480,15 @@ static bool dv_ble_scan_start(bool active) {
     int64_t tr = 0, ts = 0;
     dv_ble_say("watcher made");
     dv_ble_stopping = 0;
-    if (FAILED(wv->put_ScanningMode(w, active ? 1 : 0)) ||
-        FAILED(wv->add_Received(w, &dv_ble_recv_obj, &tr)) ||
-        FAILED(wv->add_Stopped(w, &dv_ble_stop_obj, &ts))) {
+    HRESULT hr1 = wv->put_ScanningMode(w, active ? 1 : 0);
+    HRESULT hr2 = wv->add_Received(w, &dv_ble_recv_obj, &tr);
+    HRESULT hr3 = wv->add_Stopped(w, &dv_ble_stop_obj, &ts);
+    if (FAILED(hr1) || FAILED(hr2) || FAILED(hr3)) {
         // a failed registration would "work" silently: started forever, not one event
+        char why[112];
+        snprintf(why, sizeof why, "registration failed: mode=%08lx recv=%08lx stop=%08lx",
+                 (unsigned long)hr1, (unsigned long)hr2, (unsigned long)hr3);
+        dv_ble_say(why);
         wv->remove_Received(w, tr);
         wv->remove_Stopped(w, ts);
         wv->Release(w);
