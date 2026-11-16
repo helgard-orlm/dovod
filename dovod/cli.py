@@ -116,6 +116,12 @@ def analyse(path, run_examples=True):
                 else:
                     res.diags.append(Diag('E-EXAMPLE', e.file, e.line, e.col,
                                           f"example trapped: `{e.src}` — {p[3] if len(p) > 3 else ''}"))
+            elif p[0] == 'NORUN':
+                fn, e = gen.exs[int(p[1])]
+                res.diags.append(Diag('E-EVIDENCE', e.file, e.line, e.col,
+                                      f"this example mentions `{fn}` but never runs it (`and`/`or` skipped the call): `{e.src}`",
+                                      f"make the call to `{fn}` unconditional: `ex {fn}(...) == <value>`"))
+                rep[fn]['vacuous'] = rep[fn].get('vacuous', 0) + 1
             elif p[0] == 'MUT':
                 fired, survived = int(p[2]), int(p[3])
                 if fired and survived == fired:

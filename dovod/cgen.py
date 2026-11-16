@@ -201,7 +201,8 @@ class CGen:
                    f"if (i < 0 || j < i || j > a.n) dv_trap(\"slice bounds out of range\", loc); "
                    f"{X} r; r.n = j - i; r.cap = r.n; r.p = r.n ? dv_alloc(sizeof({E}) * (size_t)r.n) : NULL; "
                    f"for (int64_t k = 0; k < r.n; k++) r.p[k] = {self.copy(et, 'a.p[i + k]')}; return r;")
-                fn(f"{X} {X}_perturb({X} a)", f"{X} r = {X}_copy(a); {E} z = {{0}}; {X}_push(&r, z); return r;")
+                fn(f"{X} {X}_perturb({X} a)", f"{X} r = {{0}}; for (int64_t i = 0; i < a.n; i++) {X}_push(&r, {pf(self.reg(et))}_perturb(a.p[i])); "
+                                               f"{E} z = {{0}}; {X}_push(&r, z); return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)",
                    f"dv_buf_puts(b, \"[\"); for (int64_t i = 0; i < a.n; i++) {{ if (i) dv_buf_puts(b, \", \"); "
                    f"{self.show(et, 'b', 'a.p[i]')} }} dv_buf_puts(b, \"]\");")
@@ -619,6 +620,7 @@ class CGen:
         else:
             if mutable:
                 k = self.fn_id[f.name]
+                self.emit(f"if (dv_depth[{k}] == 0) dv_ran[{k}]++;")
                 self.emit(f"dv_depth[{k}]++;")
                 self.emit(f"{ret} v_out = {call};")
                 self.emit(f"dv_depth[{k}]--;")
@@ -688,21 +690,23 @@ class CGen:
                 self.gen_ex(i, e, bodies)
             main.append("int main(void) { dv_test_mode = 1;")
             for i, (fname, _) in enumerate(self.exs):
-                main.append(f'if (setjmp(dv_jmp) == 0) {{ if (EX_{i}()) {{ printf("EX\\t{i}\\tok\\n"); dv_mutate({i}, {self.fn_id[fname]}, EX_{i}); }} }} '
+                k = self.fn_id[fname]
+                main.append(f'memset(dv_ran, 0, sizeof dv_ran); if (setjmp(dv_jmp) == 0) {{ if (EX_{i}()) {{ printf("EX\\t{i}\\tok\\n"); '
+                            f'if (!dv_ran[{k}]) printf("NORUN\\t{i}\\n"); dv_mutate({i}, {k}, EX_{i}); }} }} '
                             f'else printf("EX\\t{i}\\ttrap\\t%s\\n", dv_trap_msg); fflush(stdout);')
             main.append(f'for (int i = 0; i < {len(self.cov)}; i++) printf("COV\\t%d\\t%lld\\n", i, dv_cov[i]);')
             main.append("return 0; }")
             covdef = [f"static long long dv_cov[{len(self.cov) + 1}];", "#define DV_COV(i) (dv_cov[i]++)"]
-            mut = [f"static int dv_depth[{len(ck.fns) + 1}];",
+            mut = [f"static int dv_depth[{len(ck.fns) + 1}];", f"static int dv_ran[{len(ck.fns) + 1}];",
                    "static int dv_mut_mode, dv_mut_target = -1, dv_mut_fired, dv_quiet;",
                    # run example i twice more, with f's outermost result replaced by the zero / perturbed value
                    "static void dv_mutate(int i, int target, bool (*ex)(void)) {",
                    "  int fired = 0, survived = 0;",
                    "  for (int mode = 1; mode <= 2; mode++) {",
                    "    memset(dv_depth, 0, sizeof dv_depth); dv_mut_mode = mode; dv_mut_target = target; dv_mut_fired = 0; dv_quiet = 1;",
-                   "    bool passed = false;",
-                   "    if (setjmp(dv_jmp) == 0) passed = ex();",
-                   "    if (dv_mut_fired) { fired++; if (passed) survived++; }",
+                   "    bool passed = false, trapped = false;",
+                   "    if (setjmp(dv_jmp) == 0) passed = ex(); else trapped = true;",
+                   "    if (dv_mut_fired && !trapped) { fired++; if (passed) survived++; }",
                    "  }",
                    "  dv_mut_mode = 0; dv_mut_target = -1; dv_quiet = 0; memset(dv_depth, 0, sizeof dv_depth);",
                    '  printf("MUT\\t%d\\t%d\\t%d\\n", i, fired, survived);',

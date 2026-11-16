@@ -16,6 +16,8 @@ echo "$out" | grep -q "need failed" || { echo "FAIL: no need trap"; fail=1; }
 bin/dovod trust tests/bad/evidence.dv | grep -q "affects: norm, main" || { echo "FAIL: trust ledger"; fail=1; }
 out=$(bin/dovod check tests/vacuous/a_vacuous.dv 2>&1)
 [ "$(echo "$out" | grep -c E-VACUOUS)" = 4 ] || { echo "FAIL: acceptance A (vacuous examples) not all flagged"; fail=1; }
+out=$(bin/dovod check tests/vacuous/c_holes_glm.dv 2>&1)
+[ "$(echo "$out" | grep -cE "E-VACUOUS|E-EVIDENCE")" = 5 ] || { echo "FAIL: glm bypasses (L0/L1/L2) not all rejected"; fail=1; }
 bin/dovod check tests/vacuous/b_meaningful.dv >/dev/null 2>&1 || { echo "FAIL: acceptance B (meaningful examples) flagged"; fail=1; }
 DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod check tests/regress_glm_review.dv >/dev/null 2>&1 || { echo "FAIL: regress_glm_review.dv"; fail=1; }
 bin/dovod trust tests/witness_shell/t.dv --witness tests/witness_shell/w.dv | grep -q "double    self-checked" || { echo "FAIL: shell witness counted"; fail=1; }

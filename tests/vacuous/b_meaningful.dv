@@ -65,3 +65,16 @@ fn flip(l: Light) -> Light
     Green => { return Red }
   }
 }
+// meaningful examples whose zero mutant traps: must still be accepted (perturbed mutant decides)
+fn countup(n: Int) -> List[Int]
+  ex countup(3)[2] == 2
+{
+  var xs: List[Int] = []
+  for i in 0..n { xs.push(i) }
+  return xs
+}
+fn quarter(n: Int) -> Int
+  ex 100 / quarter(16) == 25
+{
+  return n / 4
+}

@@ -73,7 +73,12 @@ Clauses sit between the signature and the body, one per line, any order:
   passes under every mutant that changed the result, it pins nothing down: `E-VACUOUS`
   (`ex f(2) == f(2)`, `ex len([f(1)]) == 1`, `ex f(1) == 2 or true`). A mutant that cannot differ from the
   real result, or that never fires (f called only from inside another function), is not judged.
-  By design this also flags symmetric examples like `ex abs(-5) == abs(5)` — write `ex abs(-5) == 5`.
+  A mutant run that traps (e.g. division by the zero mutant) is also not judged, so a tautology cannot
+  hide behind a trap (`ex 100 / f(4) == 100 / f(4)` is still `E-VACUOUS`). An example must also actually
+  run `f` — `ex true or f(1) == 2` is an error. By design this also flags symmetric examples like
+  `ex abs(-5) == abs(5)` — write `ex abs(-5) == 5`.
+  **Refutable is not strong:** `ex f(1) != 0` passes the rule but pins down almost nothing. The rule
+  removes examples that cannot fail; how much an example proves is judged by people and by witnesses.
 - `need <Bool expr>` — precondition over the parameters. Checked on every call.
 - `give <Bool expr>` — postcondition; must mention `out`. Checked on every return.
 - `assume "reason"` — "I could not example this; take it on faith because …". Allowed, but it is

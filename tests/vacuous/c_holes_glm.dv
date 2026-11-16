@@ -1,0 +1,27 @@
+// Bypasses found by glm-5.3 (L0, L1, L2) — every example here must be rejected.
+fn dec(n: Int) -> Int
+  ex true or dec(1) == 2
+{
+  return n - 1
+}
+fn share(n: Int) -> Int
+  ex 100 / share(4) == 100 / share(4)
+{
+  return n
+}
+fn share2(n: Int) -> Int
+  ex share2(4) / share2(4) == 1
+{
+  return n
+}
+fn bytes2(t: Text) -> Text
+  ex byte(bytes2("ab"), 0) == byte(bytes2("ab"), 0)
+{
+  return t
+}
+fn pos(x: Int) -> Int
+  give out > 0
+  ex pos(1) == pos(1)
+{
+  return x + 1
+}
