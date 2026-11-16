@@ -21,7 +21,8 @@ Looked up first in `modules/` next to the program, then among the built-in ones 
 module relay                                   // first line of code; same as the folder name
 effect relay "switch the mains relay"          // the effect(s) this module brings; shown in `trust`
 native "relay.h"                               // at most one native file
-  targets native, win64                        // where that code exists (default: every target)
+  targets native, win64                        // where that code exists (default: native, win64, win32;
+                                               //  `arduino` — a microcontroller board — must be named)
   links "-lws2_32" on win64                    // extra linker flags (`on ...` = only for these targets)
   gui                                          // Windows: build as a window program, not a console one
 
@@ -73,6 +74,15 @@ fn relay_parse(raw: Text) -> RelayState        // ordinary Dovod: examples, stre
   Then a program can serve two modules by calling their pull functions in turn.
 - **Keep C stateless where you can.** Prefer "here is the whole new state, draw it" to patch calls: state
   kept in C is state no example sees.
+
+## Targets
+
+`native` (this machine), `win64`, `win32` (Windows .exe via MinGW) and `arduino` (a sketch folder for a
+microcontroller board). On `arduino` the native file is compiled as C inside the sketch and reaches the
+hardware only through the `dv_hw_*` functions of the generated shim (see module `mcu`): pins, clock,
+sleep, serial. There `print` goes to the serial port, files and arguments do not exist, a trap repeats
+its message on the serial port forever. Small boards have kilobytes of RAM: a module for them should
+pass Int/Bool across the border and keep Text out of the loop.
 
 ## Writing one
 

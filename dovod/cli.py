@@ -93,7 +93,7 @@ def load(path):
                 if bad:
                     raise DvError(Diag('E-MODULE', it.file, it.line, it.col, f"unknown target `{bad[0]}`",
                                        "targets: " + ', '.join(TARGETS)))
-                m['targets'], m['links'], m['gui'] = it.targets or list(TARGETS), it.links, it.gui
+                m['targets'], m['links'], m['gui'] = it.targets or list(DESKTOP), it.links, it.gui
             items.append(it)
 
     one(path, path)
@@ -112,7 +112,62 @@ def leading_comment(src):
     return '\n'.join(out)
 
 
-TARGETS = {'native': 'cc', 'win64': 'x86_64-w64-mingw32-gcc', 'win32': 'i686-w64-mingw32-gcc'}
+TARGETS = {'native': 'cc', 'win64': 'x86_64-w64-mingw32-gcc', 'win32': 'i686-w64-mingw32-gcc', 'arduino': None}
+DESKTOP = ['native', 'win64', 'win32']   # where a module's native code is assumed to work unless it says `targets`
+
+# the sketch next to dovod_prog.c: the only place that touches the Arduino API
+ARDUINO_INO = r'''// Written by `dovod build --target arduino`. Do not edit: the program is dovod_prog.c next to this file.
+#include <Arduino.h>
+extern "C" {
+  void dovod_main(void);
+  void dv_hw_write(const char* p, long n);
+  void dv_hw_trap(const char* msg, const char* loc);
+  long dv_hw_ms(void);
+  void dv_hw_sleep(long ms);
+  void dv_hw_pin_mode(int pin, int mode);
+  void dv_hw_pin_write(int pin, int on);
+  int dv_hw_pin_read(int pin);
+  int dv_hw_adc(int pin);
+  void dv_hw_pwm(int pin, int duty);
+  int dv_hw_getc(void);
+}
+void dv_hw_write(const char* p, long n) { Serial.write((const uint8_t*)p, (size_t)n); Serial.write('\n'); }
+void dv_hw_trap(const char* msg, const char* loc) {
+  for (;;) { Serial.print("trap: "); Serial.print(msg); Serial.print(" (at "); Serial.print(loc); Serial.println(")"); delay(2000); }
+}
+long dv_hw_ms(void) { return (long)millis(); }
+void dv_hw_sleep(long ms) { delay((unsigned long)ms); }
+void dv_hw_pin_mode(int pin, int mode) { pinMode(pin, mode == 0 ? OUTPUT : (mode == 2 ? INPUT_PULLUP : INPUT)); }
+void dv_hw_pin_write(int pin, int on) { digitalWrite(pin, on ? HIGH : LOW); }
+int dv_hw_pin_read(int pin) { return digitalRead(pin) == HIGH ? 1 : 0; }
+int dv_hw_adc(int pin) { return (int)analogRead(pin); }
+void dv_hw_pwm(int pin, int duty) { analogWrite(pin, duty); }
+int dv_hw_getc(void) { return Serial.available() > 0 ? Serial.read() : -1; }
+void setup() { Serial.begin(115200); dovod_main(); }
+void loop() { delay(1000); }   // reached only if the program's main returns
+'''
+
+
+def build_arduino(res, out_dir, fqbn):
+    """Write a sketch folder: OUT/OUT.ino (the shim) + OUT/dovod_prog.c (the program). With fqbn: compile it."""
+    name = os.path.basename(os.path.normpath(out_dir))
+    os.makedirs(out_dir, exist_ok=True)
+    csrc = CGen(res.ck, 'run', 'arduino').program()
+    with open(os.path.join(out_dir, 'dovod_prog.c'), 'w') as f:
+        f.write(csrc)
+    with open(os.path.join(out_dir, name + '.ino'), 'w') as f:
+        f.write(ARDUINO_INO)
+    print(f"wrote sketch {out_dir}/ ({name}.ino + dovod_prog.c)")
+    if not fqbn:
+        print(f"compile:  arduino-cli compile --fqbn <board> {out_dir}")
+        return 0
+    if shutil.which('arduino-cli') is None:
+        raise SystemExit("--fqbn needs `arduino-cli` on PATH")
+    r = subprocess.run(['arduino-cli', 'compile', '--fqbn', fqbn, '--build-path', os.path.join(out_dir, 'build'), out_dir],
+                       capture_output=True, text=True)
+    tail = [ln for ln in (r.stdout + r.stderr).splitlines() if ln.strip()]
+    print('\n'.join(tail[-12:] if r.returncode else tail[-4:]))
+    return r.returncode
 WIN_LIBS = ['-lshell32']
 
 
@@ -548,6 +603,9 @@ USAGE = """dovod — a language where code carries its evidence
   dovod run   FILE [ARGS...]    check, compile, run
   dovod build FILE [-o OUT] [--target native|win64|win32]
                                 check, compile to a binary (win64/win32: a Windows .exe via MinGW)
+  dovod build FILE --target arduino [-o DIR] [--fqbn BOARD]
+                                write a sketch folder for a microcontroller board (see `dovod spec mcu`);
+                                with --fqbn also compile it with arduino-cli
   dovod trust FILE [--witness W.dv] [--json]
                                 ledger: what the program can do, what is checked, what is assumed;
                                 W.dv = examples by another author (`use`s FILE)
@@ -642,6 +700,10 @@ def main(argv=None):
         if target not in TARGETS:
             raise SystemExit(f"unknown target `{target}`; targets: " + ', '.join(TARGETS))
         out = a[a.index('-o') + 1] if '-o' in a else os.path.splitext(os.path.basename(path))[0]
+        if target == 'arduino':
+            if 'main' not in res.ck.fns:
+                raise SystemExit("no `fn main()` in this program")
+            return build_arduino(res, out if '-o' in a else out + '_sketch', a[a.index('--fqbn') + 1] if '--fqbn' in a else None)
         if target != 'native' and not out.endswith('.exe'):
             out += '.exe'
         build(res, os.path.abspath(out), target=target)

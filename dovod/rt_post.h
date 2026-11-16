@@ -38,6 +38,10 @@ static O_Float dv_parse_float(dv_text t) {
     if (end != b + t.n) return r;
     r.has = true; r.v = v; return r;
 }
+#ifdef ARDUINO   // no console input and no files on a board (a module gives the serial port)
+static O_Text dv_read_line(void) { O_Text r = {0}; return r; }
+static O_Text dv_read_file(dv_text path) { O_Text r = {0}; (void)path; return r; }
+#else
 static O_Text dv_read_line(void) {
     O_Text r = {0}; dv_buf b = {0}; int c; bool any = false;
     while ((c = fgetc(stdin)) != EOF) { any = true; if (c == '\n') break; char ch = (char)c; dv_buf_put(&b, &ch, 1); }
@@ -54,6 +58,7 @@ static O_Text dv_read_file(dv_text path) {
     if (bad) { free(b.p); return r; }
     r.has = true; r.v = dv_buf_take(&b); return r;
 }
+#endif
 static L_Text dv_args(void) {
     L_Text r = {0};
 #ifdef _WIN32

@@ -1,0 +1,84 @@
+// Module `mcu`: a program on a microcontroller board (Arduino-family: AVR, ESP8266, ESP32, RP2040...).
+// Build:  dovod build FILE --target arduino -o DIR [--fqbn arduino:avr:leonardo]
+// It writes a sketch folder (DIR/DIR.ino + dovod_prog.c); with --fqbn it also compiles it with arduino-cli.
+// Upload with your usual tool. `print` goes to the serial port (115200); a trap repeats its message there
+// every 2 s and the program stops.
+//
+// Shape of a board program — the same as any Dovod program, the loop is yours:
+//
+//   fn step(s: State, pressed: Bool, now: Int) -> State     // pure, exampled: ALL the logic is here,
+//   fn lamp(s: State, now: Int) -> Bool                     // and it is checked on the PC, before flashing
+//
+//   fn main() uses mcu {
+//     mcu_pin_out(13)
+//     mcu_pin_in(2, true)
+//     var s = start()
+//     while true {
+//       s = step(s, not mcu_pin_get(2), mcu_ms())
+//       mcu_pin_set(13, lamp(s, mcu_ms()))
+//       mcu_sleep(5)
+//     }
+//   }
+//
+// Pin numbers are the board's Arduino pin numbers. `mcu_ms` counts from power-on and wraps after about
+// 49 days: compare times with `mcu_due`, which is right across the wrap.
+// Memory: Text and List live on the heap; on a small board (an AVR has 2 KB of RAM) keep them out of the
+// loop — Int, Bool, records and enums cost nothing. Int is 64-bit everywhere, also on 8-bit boards.
+// On the PC (`dovod check`, `dovod run`) the calls below trap: pure code and examples still run.
+module mcu
+effect mcu "drive the board: its pins, its clock and its serial port"
+native "mcu.h"
+  targets arduino
+
+extern fn mcu_pin_out(pin: Int) uses mcu                 // make the pin an output
+  need pin >= 0 and pin <= 255
+extern fn mcu_pin_in(pin: Int, pullup: Bool) uses mcu    // make it an input (pullup: reads true when nothing is connected)
+  need pin >= 0 and pin <= 255
+extern fn mcu_pin_set(pin: Int, on: Bool) uses mcu
+  need pin >= 0 and pin <= 255
+extern fn mcu_pin_get(pin: Int) -> Bool uses mcu
+  need pin >= 0 and pin <= 255
+extern fn mcu_adc(pin: Int) -> Int uses mcu              // analog reading, the board's raw units (AVR: 0..1023)
+  need pin >= 0 and pin <= 255
+extern fn mcu_pwm(pin: Int, duty: Int) uses mcu          // duty 0..255
+  need pin >= 0 and pin <= 255
+  need duty >= 0 and duty <= 255
+extern fn mcu_sleep(ms: Int) uses mcu
+  need ms >= 0 and ms <= 60000
+extern fn mcu_ms() -> Int uses mcu                       // milliseconds since power-on, 0..4294967295, then wraps
+extern fn mcu_say(line: Text) uses mcu                   // one line to the serial port
+extern fn mcu_hear() -> Opt[Text] uses mcu               // a whole line that has arrived on the serial port; never waits
+
+const mcu_wrap: Int = 4294967296       // mcu_ms wraps at 2^32
+
+// has `period` ms passed since `since`? Right across the wrap of mcu_ms.
+fn mcu_due(now: Int, since: Int, period: Int) -> Bool
+  need period >= 0
+  ex mcu_due(1000, 0, 1000) == true
+  ex mcu_due(999, 0, 1000) == false
+  ex mcu_due(5, 4294967290, 10) == true        // 11 ms passed across the wrap
+  ex mcu_due(3, 4294967290, 10) == false       // only 9
+  ex mcu_due(7, 7, 0) == true
+  ex mcu_due(7, 7, 5) == false
+{
+  var passed = now - since
+  if passed < 0 {
+    passed = passed + mcu_wrap
+  }
+  return passed >= period
+}
+
+// move x from the range in_lo..in_hi to out_lo..out_hi (ends included, clamped) — e.g. an ADC reading to a duty
+fn mcu_scale(x: Int, in_lo: Int, in_hi: Int, out_lo: Int, out_hi: Int) -> Int
+  need in_lo < in_hi
+  ex mcu_scale(512, in_lo: 0, in_hi: 1023, out_lo: 0, out_hi: 255) == 127
+  ex mcu_scale(0, in_lo: 0, in_hi: 1023, out_lo: 0, out_hi: 255) == 0
+  ex mcu_scale(1023, in_lo: 0, in_hi: 1023, out_lo: 0, out_hi: 255) == 255
+  ex mcu_scale(2000, in_lo: 0, in_hi: 1023, out_lo: 0, out_hi: 255) == 255
+  ex mcu_scale(-5, in_lo: 0, in_hi: 1023, out_lo: 10, out_hi: 255) == 10
+  ex mcu_scale(1, in_lo: 0, in_hi: 4, out_lo: 100, out_hi: 0) == 75
+  ex mcu_scale(101, in_lo: 100, in_hi: 200, out_lo: 0, out_hi: 100) == 1
+{
+  let c = min(max(x, in_lo), in_hi)
+  return out_lo + (c - in_lo) * (out_hi - out_lo) / (in_hi - in_lo)
+}

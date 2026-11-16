@@ -1,0 +1,28 @@
+// every mcu call once, on the pretend board (tests/mcu/sim.c)
+use mcu
+
+fn duty(raw: Int) -> Int
+  ex duty(0) == 0
+  ex duty(1023) == 255
+  ex duty(512) == 127
+{
+  return mcu_scale(raw, in_lo: 0, in_hi: 1023, out_lo: 0, out_hi: 255)
+}
+
+fn main() uses io, mcu {
+  mcu_pin_out(5)
+  mcu_pwm(5, duty(mcu_adc(40)))
+  match mcu_hear() {
+    some(line) => { print("heard " + line) }
+    none => { print("heard nothing") }
+  }
+  match mcu_hear() {
+    some(line) => { print("heard " + line) }
+    none => { print("heard nothing") }
+  }
+  print("ms " + show(mcu_ms()) + " due " + show(mcu_due(mcu_ms(), 0, 0)))
+  if mcu_pin_get(7) {
+    mcu_pwm(5, 300)
+  }
+  mcu_sleep(60000)
+}

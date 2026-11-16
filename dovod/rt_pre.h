@@ -27,6 +27,13 @@ static char* dv_narrow(const wchar_t* w) {
 }
 #endif
 
+#ifdef ARDUINO
+// On a board everything outside goes through the sketch's shim (written by `dovod build --target arduino`).
+void dv_hw_write(const char* p, long n);                 // one line to the serial port
+void dv_hw_trap(const char* msg, const char* loc);       // report forever; never returns
+long dv_hw_ms(void);
+#endif
+
 typedef struct { char* p; int64_t n; } dv_text;
 #define DV_LIT(s, n) ((dv_text){(char*)(s), (n)})
 
@@ -41,9 +48,22 @@ static _Noreturn void dv_trap(const char* msg, const char* loc) {
         snprintf(dv_trap_msg, sizeof dv_trap_msg, "%s (at %s)", msg, loc);
         longjmp(dv_jmp, 1);
     }
+#ifdef ARDUINO
+    dv_hw_trap(msg, loc);
+    for (;;) { }
+#else
     fflush(stdout);
     fprintf(stderr, "trap: %s (at %s)\n", msg, loc);
     exit(70);
+#endif
+}
+// Int -> decimal text, without printf's %lld (small C libraries, e.g. on AVR, do not have it)
+static char* dv_i64_str(char* end, int64_t x) {   // writes backwards from `end`, returns the start
+    uint64_t u = x < 0 ? (uint64_t)0 - (uint64_t)x : (uint64_t)x;
+    char* p = end; *p = 0;
+    do { *--p = (char)('0' + (int)(u % 10)); u /= 10; } while (u);
+    if (x < 0) *--p = '-';
+    return p;
 }
 static _Noreturn void dv_trap_text(dv_text m, const char* loc) {
     char b[400];
@@ -51,8 +71,8 @@ static _Noreturn void dv_trap_text(dv_text m, const char* loc) {
     dv_trap(b, loc);
 }
 static _Noreturn void dv_trap_idx(int64_t i, int64_t n, const char* loc) {
-    char b[120];
-    snprintf(b, sizeof b, "index %lld out of range (length %lld)", (long long)i, (long long)n);
+    char b[120], s1[24], s2[24];
+    snprintf(b, sizeof b, "index %s out of range (length %s)", dv_i64_str(s1 + 23, i), dv_i64_str(s2 + 23, n));
     dv_trap(b, loc);
 }
 static void* dv_alloc(size_t n) {
@@ -60,6 +80,7 @@ static void* dv_alloc(size_t n) {
     if (!p) dv_trap("out of memory", "runtime");
     return p;
 }
+#ifndef ARDUINO
 static FILE* dv_open_path(const char* p, int64_t n, int writing) {
 #ifdef _WIN32
     wchar_t* w = dv_wide(p, n); FILE* f = _wfopen(w, writing ? L"wb" : L"rb"); free(w); return f;
@@ -68,6 +89,7 @@ static FILE* dv_open_path(const char* p, int64_t n, int writing) {
     FILE* f = fopen(cp, writing ? "wb" : "rb"); free(cp); return f;
 #endif
 }
+#endif
 
 // ---- checked integer arithmetic
 static inline int64_t dv_add(int64_t a, int64_t b, const char* loc) { int64_t r; if (__builtin_add_overflow(a, b, &r)) dv_trap("integer overflow in +", loc); return r; }
@@ -115,7 +137,7 @@ static dv_text dv_replace(dv_text a, dv_text from, dv_text to, const char* loc) 
     }
     return dv_buf_take(&b);
 }
-static void dv_int_show(dv_buf* b, int64_t x) { char s[32]; snprintf(s, sizeof s, "%lld", (long long)x); dv_buf_puts(b, s); }
+static void dv_int_show(dv_buf* b, int64_t x) { char s[24]; dv_buf_puts(b, dv_i64_str(s + 23, x)); }
 static void dv_float_show(dv_buf* b, double x) {
     char s[48]; snprintf(s, 40, "%.15g", x);
     if (strtod(s, NULL) != x) snprintf(s, 40, "%.17g", x);
@@ -146,6 +168,11 @@ static inline bool dv_bool_perturb(bool a) { return !a; }
 static dv_text dv_text_perturb(dv_text a) { return dv_text_concat(a, DV_LIT("\x01", 1)); }
 
 // ---- effects with scalar results
+#ifdef ARDUINO   // a board: print goes to the serial port; there are no files
+static void dv_print(dv_text t) { dv_hw_write(t.p, (long)t.n); }
+static bool dv_write_file(dv_text path, dv_text data) { (void)path; (void)data; return false; }
+static int64_t dv_now_ms(void) { return (int64_t)dv_hw_ms(); }
+#else
 static void dv_print(dv_text t) { if (t.n) fwrite(t.p, 1, (size_t)t.n, stdout); fputc('\n', stdout); fflush(stdout); }
 static bool dv_write_file(dv_text path, dv_text data) {
     FILE* f = dv_open_path(path.p, path.n, 1);
@@ -163,10 +190,11 @@ static int64_t dv_now_ms(void) {
     struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
+#endif
 static int64_t dv_rand_int(int64_t lo, int64_t hi, const char* loc) {
     static uint64_t st = 0;  // xorshift64*, seeded from the clock (portable: no random()/srandom())
     if (lo > hi) dv_trap("rand_int: lo > hi", loc);
-    if (!st) { st = (uint64_t)dv_now_ms() * 0x9E3779B97F4A7C15ULL ^ (uint64_t)clock() ^ (uint64_t)(uintptr_t)&st; if (!st) st = 1; }
+    if (!st) { st = (uint64_t)dv_now_ms() * 0x9E3779B97F4A7C15ULL ^ (uint64_t)dv_now_ms() << 17 ^ (uint64_t)(uintptr_t)&st; if (!st) st = 1; }
     st ^= st >> 12; st ^= st << 25; st ^= st >> 27;
     uint64_t r = st * 2685821657736338717ULL;
     uint64_t span = (uint64_t)hi - (uint64_t)lo + 1;

@@ -175,7 +175,7 @@ f(x)                         // a call as a statement — only if it returns not
 ```
 
 Strictness (all are compile errors, each comes with a `fix:` hint):
-a name may not be reused while an outer one is visible (no shadowing; `out` may be a local name, not a parameter) · unused variables and
+a variable may not reuse the name of a visible variable or constant (no shadowing; a function's name is free for variables: `f(…)` and `f` cannot be confused; `out` may be a local name, not a parameter) · unused variables and
 parameters (prefix with `_` to keep one) · `var` never changed · ignoring a returned value
 (`let _ok = write_file(…)` to discard on purpose) · code after `return`/`break` · non-Bool conditions ·
 mixing `Int` and `Float` (use `float(i)`, `trunc(f)`).
@@ -235,6 +235,8 @@ dovod check FILE [--json]   static checks + run all examples. Diagnostics: file:
 dovod run FILE [ARGS…]      check, compile (-O2), run
 dovod build FILE [-o OUT] [--target native|win64|win32]
                             check, compile to a binary; win64/win32 = Windows .exe (needs MinGW)
+dovod build FILE --target arduino [-o DIR] [--fqbn BOARD]
+                            a sketch folder for a microcontroller board (module `mcu`: `dovod spec mcu`)
 dovod trust FILE [--witness W.dv] [--json]
                             the ledger: capabilities, per-function status, what is taken on faith
 dovod weak FILE             every small change to the code that no example notices (see Strength)

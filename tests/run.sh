@@ -52,6 +52,23 @@ if [ -x "$t2/serve" ]; then
   wait $upid || { echo "FAIL: ui_serve did not exit after the click"; fail=1; }
 fi
 rm -rf "$t2"
+# microcontrollers: the arduino target writes a sketch; its C runs here on a pretend board (tests/mcu/sim.c)
+t=build/test_mcu; mkdir -p "$t"
+bin/dovod build examples/lamp.dv --target arduino -o "$t/lamp" >/dev/null 2>&1 && [ -f "$t/lamp/lamp.ino" ] || { echo "FAIL: arduino sketch not written"; fail=1; }
+cc -std=gnu11 -DARDUINO -fsanitize=address,undefined -g -w -o "$t/lampsim" "$t/lamp/dovod_prog.c" tests/mcu/sim.c -lm 2>/dev/null || { echo "FAIL: lamp sketch does not compile for the pretend board"; fail=1; }
+out=$("$t/lampsim" 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error" && { echo "FAIL: sanitizer report in the lamp sketch"; fail=1; }
+echo "$out" | grep -q "^330 say mode: On" && echo "$out" | grep -q "^1630 say mode: Blink" || { echo "FAIL: lamp on the pretend board (short press -> On at 330, long -> Blink at 1630)"; fail=1; }
+bin/dovod build tests/mcu/all.dv --target arduino -o "$t/all" >/dev/null 2>&1
+cc -std=gnu11 -DARDUINO -fsanitize=address,undefined -g -w -o "$t/allsim" "$t/all/dovod_prog.c" tests/mcu/sim.c -lm 2>/dev/null || { echo "FAIL: mcu/all sketch does not compile"; fail=1; }
+out=$("$t/allsim" 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error" && { echo "FAIL: sanitizer report in mcu/all"; fail=1; }
+echo "$out" | grep -q "pwm pin5=99" && echo "$out" | grep -q "say heard ping" && echo "$out" | grep -q "say heard nothing" || { echo "FAIL: mcu/all output"; fail=1; }
+echo "$out" | grep -q "TRAP need failed: duty >= 0 and duty <= 255" || { echo "FAIL: mcu need not checked on the board"; fail=1; }
+bin/dovod run tests/mcu/all.dv 2>&1 | grep -q "has native code only for: arduino; this build is native" || { echo "FAIL: mcu call on the PC should trap with a clear message"; fail=1; }
+if command -v arduino-cli >/dev/null && arduino-cli core list 2>/dev/null | grep -q "arduino:avr"; then  # a real 8-bit board
+  bin/dovod build examples/lamp.dv --target arduino -o "$t/lamp" --fqbn arduino:avr:leonardo 2>&1 | grep -q "28672" || { echo "FAIL: lamp does not build for arduino:avr:leonardo"; fail=1; }
+fi
 bin/dovod trust tests/bad/evidence.dv | grep -q "affects: norm, main" || { echo "FAIL: trust ledger"; fail=1; }
 out=$(bin/dovod check tests/vacuous/a_vacuous.dv 2>&1)
 [ "$(echo "$out" | grep -c E-VACUOUS)" = 4 ] || { echo "FAIL: acceptance A (vacuous examples) not all flagged"; fail=1; }

@@ -323,7 +323,9 @@ class Checker:
     def declare(self, name, ty, kind, node):
         if name == 'out' and kind == 'param':
             self.err('E-NAME', node, "a parameter cannot be called `out`: that name is the result inside `give`")
-        elif self.lookup(name) or name in self.fns or name in self.consts or name in BUILTINS or name in POLY:
+        elif self.lookup(name) or name in self.consts:
+            # a function may share its name with a variable: `f(...)` and `f` cannot be confused, and a
+            # module's parameter names must not depend on what a program calls its functions
             self.err('E-SHADOW', node, f"name `{name}` is already in use here; shadowing is not allowed",
                      "pick a different name")
         v = Var(ty, kind, node)
@@ -339,8 +341,10 @@ class Checker:
                 continue
             if not v.used and not (v.kind == 'var' and v.mutated):
                 what = 'parameter' if v.kind == 'param' else 'variable'
-                self.err('E-UNUSED', v.node, f"{what} `{name}` is never used",
-                         f"remove it or rename to `_{name}`")
+                fix = f"remove it or rename to `_{name}`"
+                if v.kind == 'bind':
+                    what, fix = 'match binding', "leave it out of the pattern: a pattern may name any subset of the fields"
+                self.err('E-UNUSED', v.node, f"{what} `{name}` is never used", fix)
             elif v.kind == 'var' and not v.mutated:
                 self.err('E-VAR', v.node, f"`{name}` is declared `var` but never changed", "declare it with `let`")
             elif v.kind == 'var' and not v.used:

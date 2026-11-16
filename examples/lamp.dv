@@ -1,0 +1,127 @@
+// Lamp — a button and a light on a microcontroller board.
+// A short press: on / off.  A long press (0.6 s): the lamp starts blinking; a short press ends it.
+// Build:  dovod build examples/lamp.dv --target arduino -o lamp --fqbn arduino:avr:leonardo
+//
+// Everything the board DECIDES is the pure code below, checked on the PC before any flashing:
+// contact bounce, what counts as a long press, the blink rhythm, the wrap of the millisecond clock.
+use mcu
+
+const pin_button: Int = 2      // to ground; the internal pull-up keeps it high when released
+const pin_lamp: Int = 9
+const bounce_ms: Int = 30
+const long_ms: Int = 600
+const blink_ms: Int = 250
+
+enum Mode { Off, On, Blink }
+
+record Lamp {
+  mode: Mode
+  down: Bool        // the debounced button state
+  raw: Bool         // the last raw reading
+  raw_at: Int       // when the raw reading last changed
+  down_at: Int      // when the debounced press began
+  long_done: Bool   // this press has already acted as a long one
+}
+
+fn start() -> Lamp
+  ex start() == Lamp(mode: Off, down: false, raw: false, raw_at: 0, down_at: 0, long_done: false)
+{
+  return Lamp(mode: Off, down: false, raw: false, raw_at: 0, down_at: 0, long_done: false)
+}
+
+fn after_short(m: Mode) -> Mode
+  ex after_short(Off) == On
+  ex after_short(On) == Off
+  ex after_short(Blink) == Off
+{
+  match m {
+    Off => { return On }
+    On => { return Off }
+    Blink => { return Off }
+  }
+}
+
+// one look at the button: `pressed` is the raw reading, `now` the board clock
+fn step(s: Lamp, pressed: Bool, now: Int) -> Lamp
+  // a raw change only restarts the bounce timer
+  ex step(start(), true, 100) == start() with { raw: true, raw_at: 100 }
+  // still bouncing: nothing yet
+  ex step(start() with { raw: true, raw_at: 100 }, true, 129) == start() with { raw: true, raw_at: 100 }
+  // steady for 30 ms: the press is real
+  ex step(start() with { raw: true, raw_at: 100 }, true, 130) == start() with { raw: true, raw_at: 100, down: true, down_at: 130 }
+  // a bounce back within 30 ms never becomes a press
+  ex step(start() with { raw: true, raw_at: 100 }, false, 110) == start() with { raw: false, raw_at: 110 }
+  // released after a short hold: toggle
+  ex step(start() with { raw: false, raw_at: 300, down: true, down_at: 130 }, false, 330) ==
+     start() with { raw: false, raw_at: 300, down: false, down_at: 130, mode: On }
+  // held 600 ms: blink starts while still held...
+  ex step(start() with { raw: true, raw_at: 100, down: true, down_at: 130 }, true, 730) ==
+     start() with { raw: true, raw_at: 100, down: true, down_at: 130, mode: Blink, long_done: true }
+  ex step(start() with { raw: true, raw_at: 100, down: true, down_at: 130 }, true, 729).mode == Off
+  // ...and letting go after a long press does not toggle again
+  ex step(start() with { raw: false, raw_at: 900, down: true, down_at: 130, mode: Blink, long_done: true }, false, 930) ==
+     start() with { raw: false, raw_at: 900, down: false, down_at: 130, mode: Blink, long_done: false }
+  // held on after the long press: nothing more happens
+  ex step(start() with { raw: true, raw_at: 100, down: true, down_at: 130, mode: Blink, long_done: true }, true, 5000) ==
+     start() with { raw: true, raw_at: 100, down: true, down_at: 130, mode: Blink, long_done: true }
+  // nobody touches the button for a long time: nothing happens
+  ex step(start() with { mode: On }, false, 99000) == start() with { mode: On }
+  // across the wrap of the clock (2^32 ms): a press that began just before it
+  ex step(start() with { raw: true, raw_at: 4294967290 }, true, 24) ==
+     start() with { raw: true, raw_at: 4294967290, down: true, down_at: 24 }
+  ex step(start() with { raw: true, raw_at: 4294967290 }, true, 23).down == false
+{
+  if pressed != s.raw {
+    return s with { raw: pressed, raw_at: now }
+  }
+  if not mcu_due(now, s.raw_at, bounce_ms) {
+    return s
+  }
+  if pressed and not s.down {
+    return s with { down: true, down_at: now, long_done: false }
+  }
+  if not pressed and s.down {
+    if s.long_done {
+      return s with { down: false, long_done: false }
+    }
+    return s with { down: false, mode: after_short(s.mode) }
+  }
+  if pressed and s.down and not s.long_done and mcu_due(now, s.down_at, long_ms) {
+    return s with { mode: Blink, long_done: true }
+  }
+  return s
+}
+
+// is the light on at this moment?
+fn lit(s: Lamp, now: Int) -> Bool
+  ex lit(start(), 0) == false
+  ex lit(start() with { mode: On }, 12345) == true
+  ex lit(start() with { mode: Blink }, 0) == true
+  ex lit(start() with { mode: Blink }, 249) == true
+  ex lit(start() with { mode: Blink }, 250) == false
+  ex lit(start() with { mode: Blink }, 499) == false
+  ex lit(start() with { mode: Blink }, 500) == true
+{
+  match s.mode {
+    Off => { return false }
+    On => { return true }
+    Blink => { return now / blink_ms % 2 == 0 }
+  }
+}
+
+fn main() uses mcu {
+  mcu_pin_out(pin_lamp)
+  mcu_pin_in(pin_button, true)
+  mcu_say("lamp: ready")
+  var s = start()
+  while true {
+    let now = mcu_ms()
+    let before = s.mode
+    s = step(s, not mcu_pin_get(pin_button), now)
+    if s.mode != before {
+      mcu_say("mode: " + show(s.mode))
+    }
+    mcu_pin_set(pin_lamp, lit(s, now))
+    mcu_sleep(2)
+  }
+}

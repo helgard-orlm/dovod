@@ -820,7 +820,10 @@ class CGen:
                    '  printf("MUT\\t%d\\t%d\\t%d\\n", i, fired, survived);',
                    "}"]
         else:
-            main.append("int main(int argc, char** argv) { dv_argc = argc; dv_argv = argv; F_main(); return 0; }")
+            if self.target == 'arduino':   # the sketch's setup() calls this
+                main.append("void dovod_main(void) { F_main(); }")
+            else:
+                main.append("int main(int argc, char** argv) { dv_argc = argc; dv_argv = argv; F_main(); return 0; }")
             covdef = ["#define DV_COV(i)", "#define DV_STEP"]
             mut = []
         types = self.gen_types()
