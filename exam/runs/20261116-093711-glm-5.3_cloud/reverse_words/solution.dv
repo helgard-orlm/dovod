@@ -1,0 +1,22 @@
+// Reverse the order of the words in t.
+// Words are separated by single spaces; the result joins them with single spaces.
+fn reverse_words(t: Text) -> Text
+  give len(out) == len(t)
+  ex reverse_words("a bb c") == "c bb a"
+  ex reverse_words("") == ""
+  ex reverse_words("solo") == "solo"
+  ex reverse_words("x y") == "y x"
+{
+  if len(t) == 0 {
+    return ""
+  }
+  let words = split(t, " ")
+  var rev: List[Text] = []
+  var i = len(words) - 1
+  while i >= 0 {
+    rev.push(words[i])
+    i = i - 1
+  }
+  return join(rev, " ")
+}
+

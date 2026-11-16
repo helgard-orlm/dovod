@@ -1,0 +1,31 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return rle("aaabcc") == "a3b1c2"
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return rle("") == ""
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return rle("x") == "x1"
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return rle("aaaaaaaaaaaa") == "a12"
+}
+
+fn hidden_4() -> Bool
+  ex hidden_4()
+{
+  return rle("abab") == "a1b1a1b1"
+}

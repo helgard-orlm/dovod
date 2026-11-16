@@ -1,0 +1,37 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return is_palindrome("A man, a plan, a canal: Panama") == true
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return is_palindrome("abc") == false
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return is_palindrome("") == true
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return is_palindrome("No 'x' in Nixon") == true
+}
+
+fn hidden_4() -> Bool
+  ex hidden_4()
+{
+  return is_palindrome("ab1ba") == true
+}
+
+fn hidden_5() -> Bool
+  ex hidden_5()
+{
+  return is_palindrome("0P") == false
+}

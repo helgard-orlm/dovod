@@ -271,8 +271,8 @@ class Checker:
         return None
 
     def declare(self, name, ty, kind, node):
-        if name == 'out' and kind != 'out':
-            self.err('E-NAME', node, "`out` is reserved for the result inside `give`")
+        if name == 'out' and kind == 'param':
+            self.err('E-NAME', node, "a parameter cannot be called `out`: that name is the result inside `give`")
         elif self.lookup(name) or name in self.fns or name in self.consts or name in BUILTINS or name in POLY:
             self.err('E-SHADOW', node, f"name `{name}` is already in use here; shadowing is not allowed",
                      "pick a different name")

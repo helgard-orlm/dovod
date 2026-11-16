@@ -1,0 +1,13 @@
+{
+ "id": "rpn",
+ "passed_check_at": 1,
+ "own_example_failures": 0,
+ "error_codes": [
+  []
+ ],
+ "hidden": "8/8",
+ "assume": 0,
+ "unreached": 0,
+ "examples": 12,
+ "hidden_fail": []
+}

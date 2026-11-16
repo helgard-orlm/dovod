@@ -1,0 +1,25 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return mean([]) == none
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return mean([2.0]) == some(2.0)
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return mean([1.0, 2.0, 3.0, 4.0]) == some(2.5)
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return near(or_else(mean([0.1, 0.2]), 0.0), 0.15, 0.000001)
+}

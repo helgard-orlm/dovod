@@ -1,0 +1,34 @@
+// True when the brackets ( ) [ ] { } in t are balanced and properly nested;
+// every other byte is ignored.
+fn balanced(t: Text) -> Bool
+  ex balanced("") == true
+  ex balanced("a(b[c]{d})") == true
+  ex balanced("()[]{}") == true
+  ex balanced("no brackets here") == true
+  ex balanced("(]") == false
+  ex balanced("([)]") == false
+  ex balanced("((") == false
+  ex balanced(")") == false
+{
+  var stack: List[Text] = []    // for each bracket still open: the closer that must match it next
+  for i in 0..len(t) {
+    let c = slice(t, i, i + 1)
+    if c == "(" {
+      stack.push(")")
+    } else if c == "[" {
+      stack.push("]")
+    } else if c == "{" {
+      stack.push("}")
+    } else if c == ")" or c == "]" or c == "}" {
+      if len(stack) == 0 {
+        return false
+      }
+      if stack[len(stack) - 1] != c {
+        return false
+      }
+      stack.pop()
+    }
+  }
+  return len(stack) == 0
+}
+

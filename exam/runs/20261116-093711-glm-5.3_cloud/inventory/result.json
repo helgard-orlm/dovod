@@ -1,0 +1,13 @@
+{
+ "id": "inventory",
+ "passed_check_at": 1,
+ "own_example_failures": 0,
+ "error_codes": [
+  []
+ ],
+ "hidden": "4/4",
+ "assume": 0,
+ "unreached": 0,
+ "examples": 8,
+ "hidden_fail": []
+}

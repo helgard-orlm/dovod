@@ -1,0 +1,49 @@
+// rpn(t) evaluates a reverse-Polish expression of integers with the
+// operators + - *, tokens separated by single spaces.
+// A malformed expression (unknown token, too few operands, or not
+// exactly one value left at the end) gives none.
+
+fn rpn(t: Text) -> Opt[Int]
+  ex rpn("3 4 + 2 *") == some(14)
+  ex rpn("42") == some(42)
+  ex rpn("-7") == some(-7)
+  ex rpn("-5 3 *") == some(-15)
+  ex rpn("10 4 -") == some(6)
+  ex rpn("2 3 4 * +") == some(14)
+  ex rpn("3 +") == none
+  ex rpn("+ 3 4") == none
+  ex rpn("3 4") == none
+  ex rpn("3 4 &") == none
+  ex rpn("3.5 4 +") == none
+  ex rpn("") == none
+{
+  var stack: List[Int] = []
+  for tok in split(t, " ") {
+    if tok == "+" or tok == "-" or tok == "*" {
+      if len(stack) < 2 {
+        return none
+      }
+      let b = stack[len(stack) - 1]
+      let a = stack[len(stack) - 2]
+      stack.pop()
+      stack.pop()
+      if tok == "+" {
+        stack.push(a + b)
+      } else if tok == "-" {
+        stack.push(a - b)
+      } else {
+        stack.push(a * b)
+      }
+    } else {
+      match parse_int(tok) {
+        some(v) => { stack.push(v) }
+        none => { return none }
+      }
+    }
+  }
+  if len(stack) == 1 {
+    return some(stack[0])
+  }
+  return none
+}
+

@@ -1,0 +1,24 @@
+// fizzbuzz: "FizzBuzz" for multiples of 15, "Fizz" for 3, "Buzz" for 5,
+// otherwise the number itself as text.
+fn fizzbuzz(n: Int) -> Text
+  need n >= 1
+  give len(out) >= 1
+  ex fizzbuzz(15) == "FizzBuzz"
+  ex fizzbuzz(30) == "FizzBuzz"
+  ex fizzbuzz(3) == "Fizz"
+  ex fizzbuzz(9) == "Fizz"
+  ex fizzbuzz(5) == "Buzz"
+  ex fizzbuzz(10) == "Buzz"
+  ex fizzbuzz(7) == "7"
+  ex fizzbuzz(1) == "1"
+{
+  if n % 15 == 0 {
+    return "FizzBuzz"
+  } else if n % 3 == 0 {
+    return "Fizz"
+  } else if n % 5 == 0 {
+    return "Buzz"
+  }
+  return show(n)
+}
+

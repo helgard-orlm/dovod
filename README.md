@@ -59,14 +59,41 @@ $ dovod trust tests/bad/evidence.dv
   can:    read/write the console (io)
   cannot: read files; write files; read command-line arguments; read the clock; use randomness; network; run other programs
 
-  function       status    examples  blocks  notes
-  sign           partial   2/2       2/3     never ran: line 7 (if)
-  fast_inv_sqrt  assumed   -         -       ASSUMED: "accurate to 1e-6 for x in 0.01..100; checked by hand against a table"
-  norm           tested    1/1       1/1     rests on assumed: fast_inv_sqrt
-  main           shell     -         -       effects: io; rests on assumed: fast_inv_sqrt
+  function       status          examples  blocks  notes
+  sign           partial         2/2       2/3     never ran: line 7 (if)
+  fast_inv_sqrt  assumed         -         -       ASSUMED: "accurate to 1e-6 for x in 0.01..100; checked by hand against a table"
+  norm           self-checked    1/1       1/1     rests on assumed: fast_inv_sqrt
+  main           shell           -         -       effects: io; rests on assumed: fast_inv_sqrt
   taken on faith:
     - fast_inv_sqrt: "..."  -> affects: norm, main
 ```
+
+### What "checked" means — and what it does not
+
+Examples written by the same author as the code catch slips and forgotten cases. They do **not** catch a
+misunderstood task: the same misunderstanding goes into the code and into its examples. So the ledger
+calls such a function `self-checked`, not "correct". For an independent check, someone else (a human,
+another model) writes a *witness* file that `use`s the code:
+
+```
+$ dovod trust examples/witness/rpn.dv --witness examples/witness/rpn_witness.dv
+  function  status          examples  blocks  notes
+  rpn       witness-failed  12/12     2/2     independent examples passed: 8/9
+  independent examples that failed:
+    examples/witness/rpn_witness.dv:44: example trapped: `w_overflow()` — integer overflow in + ...
+```
+
+`rpn` was written by glm-5.3 in the exam below and passes all 12 of its own examples; the witness found
+that it traps on overflow instead of returning `none`.
+
+## Exam: a model that has never seen Dovod
+
+`exam/exam.py`: the model gets only SPEC.md and a task, sees `dovod check` output, up to 5 attempts;
+then hidden tests it never saw are run. glm-5.3 (cloud), 2026-11-16, 8 tasks (fizzbuzz, reverse words,
+palindrome, mean, run-length encoding, bracket balance, RPN calculator, record inventory):
+**8/8 passed `check`, 7 on the first attempt; hidden tests 43/43.** The one retry was a compiler wart
+(a local variable named `out` was refused) — fixed since. The tasks turned out too easy to show where
+the evidence rule pays off: glm's own examples caught 0 bugs because there were none. Harder tasks next.
 
 ## Use
 

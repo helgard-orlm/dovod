@@ -77,7 +77,7 @@ def analyse(path, run_examples=True):
     rep = {}
     for f in ck.fns.values():
         n = f.node
-        kind = 'shell' if (f.uses or f.name == 'main') else ('assumed' if n.assume else 'tested')
+        kind = 'shell' if (f.uses or f.name == 'main') else ('assumed' if n.assume else 'self-checked')
         rep[f.name] = {'name': f.name, 'status': kind, 'uses': list(f.uses), 'examples': len(n.exs), 'passed': 0,
                        'blocks': 0, 'hit': 0, 'unreached': [], 'assume': n.assume[0] if n.assume else None,
                        'line': n.line, 'lines': n.end_line - n.line + 1, 'file': n.file}
@@ -133,7 +133,7 @@ def analyse(path, run_examples=True):
             else:
                 r['unreached'].append((c['line'], c['kind']))
         for r in rep.values():
-            if r['status'] == 'tested':
+            if r['status'] == 'self-checked':
                 if r['passed'] < r['examples']:
                     r['status'] = 'failed'
                 elif r['hit'] < r['blocks']:
@@ -188,7 +188,34 @@ def manifest(ck):
     return used
 
 
-def cmd_trust(res, path):
+def apply_witness(res, wpath):
+    """Run a witness file (examples by another author that `use` this code). Functions it calls
+    directly become `witnessed` (all its examples pass) or `witness-failed`."""
+    w = analyse(wpath)
+    if w.ck is None or any(d.code != 'E-EXAMPLE' for d in w.diags):
+        report(w, False)
+        raise SystemExit(f"witness file {wpath} does not check (see above)")
+    wfile = os.path.normpath(wpath)
+    own = {f['name']: f for f in res.fns}
+    wfns = [f for f in w.ck.fns.values() if os.path.normpath(f.node.file) == wfile]
+    failed_lines = [d.line for d in w.diags if os.path.normpath(d.file) == wfile]
+    hits = {}
+    for f in wfns:
+        bad = any(f.node.line <= ln <= f.node.end_line for ln in failed_lines)
+        n_ex = len(f.node.exs)
+        for callee in f.calls:
+            if callee in own:
+                h = hits.setdefault(callee, [0, 0])
+                h[0] += n_ex
+                h[1] += 0 if bad else n_ex
+    for name, (total, ok) in hits.items():
+        own[name]['witness'] = f"{ok}/{total}"
+        if own[name]['status'] != 'shell':
+            own[name]['status'] = 'witnessed' if ok == total else 'witness-failed'
+    return w
+
+
+def cmd_trust(res, path, witness=None):
     ck = res.ck
     used = manifest(ck)
     print(f"TRUST LEDGER  {path}")
@@ -197,11 +224,11 @@ def cmd_trust(res, path):
           + "; network; run other programs")
     print()
     w = max(len(f['name']) for f in res.fns)
-    print(f"  {'function'.ljust(w)}  status    examples  blocks  notes")
+    print(f"  {'function'.ljust(w)}  status          examples  blocks  notes")
     for f in res.fns:
         st = f['status']
         exs = f"{f['passed']}/{f['examples']}" if st not in ('shell', 'assumed') or f['examples'] else '-'
-        bl = f"{f['hit']}/{f['blocks']}" if st in ('tested', 'partial', 'failed') else '-'
+        bl = f"{f['hit']}/{f['blocks']}" if f['blocks'] else '-'
         notes = []
         if st == 'assumed':
             notes.append(f"ASSUMED: \"{f['assume']}\"")
@@ -209,15 +236,24 @@ def cmd_trust(res, path):
             notes.append("effects: " + (', '.join(f['uses']) or 'none'))
         if f['unreached'] and st == 'partial':
             notes.append("never ran: " + ', '.join(f"line {l} ({k})" for l, k in f['unreached']))
+        if f.get('witness'):
+            notes.append(f"independent examples passed: {f['witness']}")
         if f['rests_on']:
             notes.append("rests on assumed: " + ', '.join(f['rests_on']))
-        print(f"  {f['name'].ljust(w)}  {st.ljust(8)}  {exs.ljust(8)}  {bl.ljust(6)}  {'; '.join(notes)}")
+        print(f"  {f['name'].ljust(w)}  {st.ljust(14)}  {exs.ljust(8)}  {bl.ljust(6)}  {'; '.join(notes)}")
     cnt = {}
     for f in res.fns:
         cnt[f['status']] = cnt.get(f['status'], 0) + 1
     total = sum(f['lines'] for f in res.fns)
     shell = sum(f['lines'] for f in res.fns if f['status'] == 'shell')
     print()
+    if witness is not None and witness.diags:
+        print("  independent examples that failed:")
+        for d in witness.diags:
+            print(f"    {d.file}:{d.line}: {d.msg}")
+        print()
+    print("  self-checked = agrees with its author's own examples: catches slips, not a misread task.")
+    print("  witnessed    = also passed examples written by someone else (--witness FILE).")
     print("  summary: " + ', '.join(f"{v} {k}" for k, v in cnt.items())
           + f". Unchecked shell = {shell} of {total} function lines ({100 * shell // max(total, 1)}%).")
     assumed = [f for f in res.fns if f['status'] == 'assumed']
@@ -269,7 +305,9 @@ USAGE = """dovod — a language where code carries its evidence
   dovod check FILE [--json]     type-check, run every example, report
   dovod run   FILE [ARGS...]    check, compile, run
   dovod build FILE [-o OUT]     check, compile to a native binary
-  dovod trust FILE [--json]     ledger: what the program can do, what is tested, what is assumed
+  dovod trust FILE [--witness W.dv] [--json]
+                                ledger: what the program can do, what is checked, what is assumed;
+                                W.dv = examples by another author (`use`s FILE)
   dovod card  FILE              interface only (signatures, contracts, examples) for another agent
   dovod spec                    print the whole language spec (fits in one context window)
 """
@@ -303,10 +341,13 @@ def main(argv=None):
         report(res, as_json)
         return 0 if res.ok else 1
     if cmd == 'trust':
+        wit = None
+        if res.ok and '--witness' in a:
+            wit = apply_witness(res, a[a.index('--witness') + 1])
         if as_json or not res.ok:
             report(res, as_json)
             return 0 if res.ok else 1
-        cmd_trust(res, path)
+        cmd_trust(res, path, wit)
         return 0
     if not res.ok:
         report(res, False)

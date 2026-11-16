@@ -1,0 +1,16 @@
+{
+ "id": "rle",
+ "passed_check_at": 2,
+ "own_example_failures": 0,
+ "error_codes": [
+  [
+   "E-NAME"
+  ],
+  []
+ ],
+ "hidden": "5/5",
+ "assume": 0,
+ "unreached": 0,
+ "examples": 9,
+ "hidden_fail": []
+}

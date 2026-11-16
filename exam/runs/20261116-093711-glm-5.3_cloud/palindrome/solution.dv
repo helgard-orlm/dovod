@@ -1,0 +1,73 @@
+// is_palindrome: true when t reads the same forwards and backwards,
+// ignoring case and keeping only ASCII letters and digits.
+// The text is ASCII, so one byte is one character.
+
+// Lowercase one ASCII byte: 'A'-'Z' (65-90) become 'a'-'z' (97-122).
+fn lower_byte(c: Int) -> Int
+  ex lower_byte(65) == 97
+  ex lower_byte(90) == 122
+  ex lower_byte(97) == 97
+  ex lower_byte(48) == 48
+{
+  if c >= 65 and c <= 90 {
+    return c + 32
+  }
+  return c
+}
+
+// True for ASCII digits ('0'-'9') and letters of either case.
+fn is_alnum(c: Int) -> Bool
+  ex is_alnum(48) == true
+  ex is_alnum(57) == true
+  ex is_alnum(65) == true
+  ex is_alnum(90) == true
+  ex is_alnum(97) == true
+  ex is_alnum(122) == true
+  ex is_alnum(32) == false
+  ex is_alnum(58) == false
+{
+  return (c >= 48 and c <= 57) or (c >= 65 and c <= 90) or (c >= 97 and c <= 122)
+}
+
+// Keep only the letters and digits of t, lowercased.
+fn clean(t: Text) -> Text
+  ex clean("A man, a plan") == "amanaplan"
+  ex clean("0P") == "0p"
+  ex clean("") == ""
+{
+  var acc = ""
+  for i in 0..len(t) {
+    let c = byte(t, i)
+    if is_alnum(c) {
+      acc = acc + from_byte(lower_byte(c))
+    }
+  }
+  return acc
+}
+
+// t with its bytes in the opposite order.
+fn reverse(t: Text) -> Text
+  ex reverse("abc") == "cba"
+  ex reverse("") == ""
+  ex reverse("aa") == "aa"
+{
+  var acc = ""
+  for i in 0..len(t) {
+    acc = from_byte(byte(t, i)) + acc
+  }
+  return acc
+}
+
+fn is_palindrome(t: Text) -> Bool
+  ex is_palindrome("A man, a plan, a canal: Panama") == true
+  ex is_palindrome("abc") == false
+  ex is_palindrome("") == true
+  ex is_palindrome("No 'x' in Nixon") == true
+  ex is_palindrome("0P") == false
+  ex is_palindrome("12321") == true
+  ex is_palindrome("1a2") == false
+{
+  let c = clean(t)
+  return c == reverse(c)
+}
+

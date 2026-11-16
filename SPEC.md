@@ -77,9 +77,14 @@ Rules:
 - A function with effects cannot have `ex` (examples must be repeatable). It is a **shell**: keep it
   thin and put logic into pure functions.
 - `uses` must list exactly the effects the function performs, itself or through callees — no more, no less.
-- Statuses in `dovod trust`: `tested` (examples pass and reach every block) · `partial` (some block
-  never ran — the report names the line) · `assumed` · `shell`. A block that starts with `trap(...)`
-  is not counted.
+- Statuses in `dovod trust`: `self-checked` (its own examples pass and reach every block) · `partial`
+  (some block never ran — the report names the line) · `assumed` · `shell` · `witnessed` /
+  `witness-failed` (see below). A block that starts with `trap(...)` is not counted.
+- **Limit, stated plainly:** examples written by the same author as the code catch slips and forgotten
+  cases, but not a misunderstood task — the same misunderstanding goes into both. For that, give
+  `dovod trust FILE --witness W.dv`: W.dv is written by someone else (a human, another model), starts
+  with `use "FILE"`, and holds functions like `fn w1() -> Bool  ex w1() { return f(2) == 4 }`.
+  Every function of FILE called directly from W.dv becomes `witnessed` or `witness-failed`.
 
 Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand`.
 There is no other way to reach the outside world, so the effects of `main` are the whole truth
@@ -119,7 +124,7 @@ f(x)                         // a call as a statement — only if it returns not
 ```
 
 Strictness (all are compile errors, each comes with a `fix:` hint):
-a name may not be reused while an outer one is visible (no shadowing) · unused variables and
+a name may not be reused while an outer one is visible (no shadowing; `out` may be a local name, not a parameter) · unused variables and
 parameters (prefix with `_` to keep one) · `var` never changed · ignoring a returned value
 (`let _ok = write_file(…)` to discard on purpose) · code after `return`/`break` · non-Bool conditions ·
 mixing `Int` and `Float` (use `float(i)`, `trunc(f)`).
@@ -170,7 +175,8 @@ rand_int(lo, hi) -> Int              uses rand      // inclusive
 dovod check FILE [--json]   static checks + run all examples. Diagnostics: file:line:col, code, msg, fix.
 dovod run FILE [ARGS…]      check, compile (-O2), run
 dovod build FILE [-o OUT]   check, compile to a native binary
-dovod trust FILE [--json]   the ledger: capabilities, per-function status, what is taken on faith
+dovod trust FILE [--witness W.dv] [--json]
+                            the ledger: capabilities, per-function status, what is taken on faith
 dovod card FILE             interface only: signatures, contracts, two examples each — hand this to
                             another agent instead of the source
 dovod spec                  this file

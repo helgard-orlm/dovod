@@ -1,0 +1,109 @@
+[
+ {
+  "id": "fizzbuzz",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "5/5",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 8,
+  "hidden_fail": []
+ },
+ {
+  "id": "reverse_words",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "4/4",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 4,
+  "hidden_fail": []
+ },
+ {
+  "id": "palindrome",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "6/6",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 25,
+  "hidden_fail": []
+ },
+ {
+  "id": "mean",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "4/4",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 5,
+  "hidden_fail": []
+ },
+ {
+  "id": "rle",
+  "passed_check_at": 2,
+  "own_example_failures": 0,
+  "error_codes": [
+   [
+    "E-NAME"
+   ],
+   []
+  ],
+  "hidden": "5/5",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 9,
+  "hidden_fail": []
+ },
+ {
+  "id": "balanced",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "7/7",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 8,
+  "hidden_fail": []
+ },
+ {
+  "id": "rpn",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "8/8",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 12,
+  "hidden_fail": []
+ },
+ {
+  "id": "inventory",
+  "passed_check_at": 1,
+  "own_example_failures": 0,
+  "error_codes": [
+   []
+  ],
+  "hidden": "4/4",
+  "assume": 0,
+  "unreached": 0,
+  "examples": 8,
+  "hidden_fail": []
+ }
+]

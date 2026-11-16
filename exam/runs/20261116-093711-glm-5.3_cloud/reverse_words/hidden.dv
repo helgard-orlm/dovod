@@ -1,0 +1,25 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return reverse_words("a bb c") == "c bb a"
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return reverse_words("") == ""
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return reverse_words("one") == "one"
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return reverse_words("x y") == "y x"
+}

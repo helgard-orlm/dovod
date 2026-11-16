@@ -1,0 +1,25 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return total([]) == 0
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return total([Item(name: "a", price: 250, qty: 2), Item(name: "b", price: 100, qty: 3)]) == 800
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return priciest([]) == none
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return priciest([Item(name: "a", price: 5, qty: 1), Item(name: "b", price: 9, qty: 1), Item(name: "c", price: 9, qty: 1)]) == some("b")
+}

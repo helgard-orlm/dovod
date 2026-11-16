@@ -1,0 +1,40 @@
+// Run-length encoding for ASCII text: each maximal run of one character
+// becomes that character followed by the length of the run.
+//   "aaabcc" -> "a3b1c2"      "" -> ""
+
+fn is_ascii(t: Text) -> Bool
+  ex is_ascii("") == true
+  ex is_ascii("aZ9 ~") == true
+  ex is_ascii("héllo") == false
+{
+  for i in 0..len(t) {
+    if byte(t, i) > 127 { return false }
+  }
+  return true
+}
+
+fn rle(t: Text) -> Text
+  need is_ascii(t)
+  give len(out) > 0 or t == ""
+  ex rle("") == ""
+  ex rle("a") == "a1"
+  ex rle("abc") == "a1b1c1"
+  ex rle("aaabcc") == "a3b1c2"
+  ex rle("aaaaaaaaaaa") == "a11"
+  ex rle("wwwwaaadexxxxxx") == "w4a3d1e1x6"
+{
+  let n = len(t)
+  if n == 0 { return "" }
+  var acc = ""
+  var run = 1
+  for i in 1..n {
+    if byte(t, i) == byte(t, i - 1) {
+      run = run + 1
+    } else {
+      acc = acc + from_byte(byte(t, i - 1)) + show(run)
+      run = 1
+    }
+  }
+  return acc + from_byte(byte(t, n - 1)) + show(run)
+}
+

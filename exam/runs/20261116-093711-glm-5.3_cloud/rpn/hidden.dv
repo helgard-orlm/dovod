@@ -1,0 +1,49 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return rpn("3 4 + 2 *") == some(14)
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return rpn("5") == some(5)
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return rpn("1 +") == none
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return rpn("1 2") == none
+}
+
+fn hidden_4() -> Bool
+  ex hidden_4()
+{
+  return rpn("2 x +") == none
+}
+
+fn hidden_5() -> Bool
+  ex hidden_5()
+{
+  return rpn("10 3 -") == some(7)
+}
+
+fn hidden_6() -> Bool
+  ex hidden_6()
+{
+  return rpn("-5 2 *") == some(-10)
+}
+
+fn hidden_7() -> Bool
+  ex hidden_7()
+{
+  return rpn("") == none
+}

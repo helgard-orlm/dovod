@@ -1,0 +1,43 @@
+use "solution.dv"
+
+fn hidden_0() -> Bool
+  ex hidden_0()
+{
+  return balanced("a(b[c]{d})") == true
+}
+
+fn hidden_1() -> Bool
+  ex hidden_1()
+{
+  return balanced("(]") == false
+}
+
+fn hidden_2() -> Bool
+  ex hidden_2()
+{
+  return balanced("((") == false
+}
+
+fn hidden_3() -> Bool
+  ex hidden_3()
+{
+  return balanced("") == true
+}
+
+fn hidden_4() -> Bool
+  ex hidden_4()
+{
+  return balanced("())(") == false
+}
+
+fn hidden_5() -> Bool
+  ex hidden_5()
+{
+  return balanced("{[()()]}") == true
+}
+
+fn hidden_6() -> Bool
+  ex hidden_6()
+{
+  return balanced(")") == false
+}

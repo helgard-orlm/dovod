@@ -1,0 +1,19 @@
+// Arithmetic mean of a list of floats; none when the list is empty.
+fn mean(xs: List[Float]) -> Opt[Float]
+  give (out == none) == (len(xs) == 0)
+  ex mean([]) == none
+  ex mean([5.0]) == some(5.0)
+  ex mean([1.0, 2.0]) == some(1.5)
+  ex mean([1.0, 2.0, 3.0]) == some(2.0)
+  ex mean([-1.0, 1.0]) == some(0.0)
+{
+  if len(xs) == 0 {
+    return none
+  }
+  var total = 0.0
+  for x in xs {
+    total = total + x
+  }
+  return some(total / float(len(xs)))
+}
+

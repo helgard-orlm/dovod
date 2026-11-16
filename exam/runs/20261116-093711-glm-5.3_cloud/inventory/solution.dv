@@ -1,0 +1,40 @@
+// An Item in a basket; price is in cents.
+record Item { name: Text, price: Int, qty: Int }
+
+// Sum of price * qty over all items.
+fn total(items: List[Item]) -> Int
+  ex total([]) == 0
+  ex total([Item(name: "pen", price: 100, qty: 2)]) == 200
+  ex total([Item(name: "free", price: 999, qty: 0)]) == 0
+  ex total([Item(name: "pen", price: 100, qty: 2),
+            Item(name: "ink", price: 50, qty: 3)]) == 350
+{
+  var sum = 0
+  for it in items {
+    sum = sum + it.price * it.qty
+  }
+  return sum
+}
+
+// Name of the item with the highest price; the first one on a tie, none if empty.
+fn priciest(items: List[Item]) -> Opt[Text]
+  ex priciest([]) == none
+  ex priciest([Item(name: "pen", price: 100, qty: 2)]) == some("pen")
+  ex priciest([Item(name: "a", price: 100, qty: 1),
+               Item(name: "b", price: 300, qty: 1),
+               Item(name: "c", price: 200, qty: 1)]) == some("b")
+  ex priciest([Item(name: "pen", price: 300, qty: 1),
+               Item(name: "ink", price: 300, qty: 2)]) == some("pen")
+{
+  if len(items) == 0 {
+    return none
+  }
+  var best = items[0]
+  for it in items {
+    if it.price > best.price {
+      best = it
+    }
+  }
+  return some(best.name)
+}
+
