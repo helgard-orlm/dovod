@@ -113,7 +113,7 @@ static void dv_text_show(dv_buf* b, dv_text t) {
 }
 
 // ---- mutants for the "an example must be able to fail" check
-static inline int64_t dv_int_perturb(int64_t a) { return a == INT64_MAX ? a - 1 : a + 1; }
+static inline int64_t dv_int_perturb(int64_t a) { return (a == INT64_MAX || a == -1) ? a - 1 : a + 1; }
 static inline double dv_float_perturb(double a) { return a + 1.0; }
 static inline bool dv_bool_perturb(bool a) { return !a; }
 static dv_text dv_text_perturb(dv_text a) { return dv_text_concat(a, DV_LIT("\x01", 1)); }

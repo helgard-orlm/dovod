@@ -77,6 +77,10 @@ Clauses sit between the signature and the body, one per line, any order:
   hide behind a trap (`ex 100 / f(4) == 100 / f(4)` is still `E-VACUOUS`). An example must also actually
   run `f` — `ex true or f(1) == 2` is an error. By design this also flags symmetric examples like
   `ex abs(-5) == abs(5)` — write `ex abs(-5) == 5`.
+  An example whose two sides are written the same (`ex g(f(1)) == g(f(1))`) is rejected without running.
+  The Int mutant never turns `-1` into `0` (`-1` → `-2`), so a "not found" sentinel cannot hide a
+  tautology behind a division trap. Remaining known gap: an example built so that *both* mutants trap
+  while the two sides are written differently is not judged.
   **Refutable is not strong:** `ex f(1) != 0` passes the rule but pins down almost nothing. The rule
   removes examples that cannot fail; how much an example proves is judged by people and by witnesses.
 - `need <Bool expr>` — precondition over the parameters. Checked on every call.

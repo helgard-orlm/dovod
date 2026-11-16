@@ -1,0 +1,12 @@
+// Sentinel collision found by glm-5.3: real result -1, both mutants used to trap. Both must be rejected.
+fn find_idx(_t: Text, _sub: Text) -> Int
+  ex 100 / find_idx("ab", "z") == 100 / find_idx("ab", "z")
+{
+  return -1
+}
+
+fn find_idx2(_t: Text, _sub: Text) -> Int
+  ex 100 / find_idx2("ab", "z") == 100 / (find_idx2("ab", "z") + 0)
+{
+  return -1
+}

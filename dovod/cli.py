@@ -170,6 +170,13 @@ def analyse(path, run_examples=True):
             stack.extend(ck.fns[x].calls)
         rep[f.name]['rests_on'] = sorted(x for x in seen if rep[x]['assume'] and x != f.name)
     res.fns = [rep[f] for f in ck.fns]
+    for d in ck.late:
+        res.diags = [x for x in res.diags if (x.file, x.line, x.col) != (d.file, d.line, d.col)]
+        res.diags.append(d)
+        for f in res.fns:
+            if f['file'] == d.file and f['line'] <= d.line <= f['line'] + f['lines'] and f['status'] != 'shell':
+                f['status'] = 'failed'
+    res.diags.sort(key=lambda d: (d.file, d.line, d.col))
     res.ok = not res.diags
     return res
 

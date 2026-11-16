@@ -87,6 +87,16 @@ def names_in(e, acc):
     return acc
 
 
+def ast_key(e):
+    """Structure of an expression without positions, for spotting `A == A`."""
+    if not hasattr(e, 'k'):
+        if isinstance(e, (list, tuple)):
+            return tuple(ast_key(x) for x in e)
+        return e
+    skip = ('file', 'line', 'col', 'ty', 'src', 'ref', 'builtin', 'effectful', 'variant')
+    return (e.k,) + tuple((k, ast_key(v)) for k, v in sorted(e.__dict__.items()) if k not in skip)
+
+
 def lv_root(e):
     while e.k in ('Field', 'Index'):
         e = e.e
@@ -142,6 +152,7 @@ class Checker:
         self.cur = None
         self.pure_ctx = None  # 'ex' | 'need' | 'give' when checking a clause
         self.loop_depth = 0
+        self.late = []  # findings that must not stop the examples from running
 
     # -- diagnostics
     def err(self, code, node, msg, fix=None):
@@ -354,7 +365,12 @@ class Checker:
             self.scopes = [{}]
             for e in n.exs:
                 self.clause(e, 'ex')
-                if not calls_fn(e, f.name):
+                if e.k == 'Bin' and e.op in ('==', '!=', '<', '<=', '>', '>=') and ast_key(e.l) == ast_key(e.r):
+                    # reported after the examples run, so it does not hide the other findings
+                    self.late.append(Diag('E-VACUOUS', e.file, e.line, e.col,
+                                          "both sides of this comparison are the same expression, so it pins down nothing",
+                                          f"compare with a concrete expected value: `ex {f.name}(...) == <value>`"))
+                elif not calls_fn(e, f.name):
                     self.err('E-EVIDENCE', e, f"this example does not call `{f.name}`, so it proves nothing about it",
                              f"write it as `ex {f.name}(...) == expected`")
             if not n.exs and not n.assume:
