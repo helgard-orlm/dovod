@@ -177,6 +177,8 @@ static int64_t dv_ble_tok_recv, dv_ble_tok_stop;
 static bool dv_ble_watching, dv_ble_stopping;
 static volatile LONG dv_ble_busy;       // callbacks in flight (the stop handshake waits for 0)
 static volatile LONG dv_ble_dbg = 5;    // the first N shouts leave a trace (crash hunting)
+static volatile LONG dv_ble_qidbg = 24;   // the first N QI/seam calls get a trace
+static CONDITION_VARIABLE dv_ble_wcv;    // the worker's wait (under dv_ble_cs)
 static HANDLE dv_ble_lf = INVALID_HANDLE_VALUE;   // blescan.log next to the exe, opened once
 
 // the start steps and the first events leave a trail; a hard crash says where it happened
@@ -248,6 +250,7 @@ static void dv_ble_ensure(void) {
     if (!dv_ble_made) {
         InitializeCriticalSection(&dv_ble_cs);
         InitializeConditionVariable(&dv_ble_cv);
+        InitializeConditionVariable(&dv_ble_wcv);
         SetUnhandledExceptionFilter(dv_ble_crash);
         char path[MAX_PATH * 2];
         DWORD n = GetModuleFileNameA(NULL, path, sizeof path);
@@ -360,8 +363,6 @@ static HRESULT WINAPI dv_ble_h_name(void* self, HSTRING* out) {
     static const wchar_t n[] = L"Windows.Foundation.TypedEventHandler`2";
     return WindowsCreateString(n, (UINT32)(sizeof n / 2 - 1), out);
 }
-
-static volatile LONG dv_ble_qidbg = 24;   // the first N QI calls get a trace
 
 static HRESULT WINAPI dv_ble_qi_recv(void* self, REFIID riid, void** out) {
     if (!out) return E_POINTER;
@@ -544,44 +545,86 @@ static dv_ble_hobj dv_ble_recv_obj = { dv_ble_recv_vt };
 static dv_ble_hobj dv_ble_stop_obj = { dv_ble_stop_vt };
 
 // ---- the three entry points ------------------------------------------------------------
+//
+// All WinRT lives on a dedicated worker thread with its own honest MTA. The main thread of a
+// console program can be a poisoned apartment: opening the panel (ShellExecute) leaves the thread
+// STA-initialized, RoInitialize(MTA) then returns CHANGED_MODE — and a handler registered from a
+// non-pumping STA makes the event delivery marshal to a message queue nobody drains: first a crash
+// inside their delivery (a broken proxy), then a hang. A fresh worker thread cannot be poisoned,
+// and the agile handlers are then called directly on the pool threads.
 
 static void dv_ble_scan_stop(void);
 
-static bool dv_ble_scan_start(bool active) {
-    dv_ble_ensure();
-    if (dv_ble_w) { dv_ble_scan_stop(); }            // restart cleanly (e.g. after a spontaneous "off")
-    dv_ble_ensure();
-    { char w[192];
-      snprintf(w, sizeof w, "scan_start: image=%p recv_obj=%p recv_vt=%p stop_obj=%p",
-               (void*)GetModuleHandleA(NULL), (void*)&dv_ble_recv_obj, (void*)dv_ble_recv_vt, (void*)&dv_ble_stop_obj);
-      dv_ble_say(w); }
-    if (!dv_ble_ro) {
-        HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
-        if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) { return false; }
-        dv_ble_ro = 1;                                // never uninitialized: later callers rely on it
+static volatile LONG dv_ble_result;        // 0 pending, 1 started, -1 failed
+static volatile LONG dv_ble_stop_req;      // main -> worker: stop now
+static volatile LONG dv_ble_done;          // worker: everything released
+static volatile LONG dv_ble_req_active;    // the mode this scan runs in
+static HANDLE dv_ble_thread = NULL;
+
+static void dv_ble_worker_cleanup(void* w, bool was_started) {
+    if (w) {
+        dv_ble_watcherVtbl* wv = *(dv_ble_watcherVtbl**)w;
+        if (was_started) {
+            dv_ble_stopping = 1;                       // the Stopped event must not say "off"
+            wv->remove_Received(w, dv_ble_tok_recv);
+            wv->remove_Stopped(w, dv_ble_tok_stop);
+            wv->Stop(w);
+            // wait until the last callback left: a Release with a live callback would crash
+            ULONGLONG deadline = GetTickCount64() + 2000;
+            EnterCriticalSection(&dv_ble_cs);
+            while (dv_ble_busy > 0 && GetTickCount64() < deadline) {
+                SleepConditionVariableCS(&dv_ble_cv, &dv_ble_cs, 50);
+            }
+            LeaveCriticalSection(&dv_ble_cs);
+        }
+        wv->Release(w);
     }
+    EnterCriticalSection(&dv_ble_cs);
+    if (!dv_ble_result) { dv_ble_result = -1; }   // a failed start must not make main wait 6 s
+    dv_ble_w = NULL;
+    dv_ble_watching = 0;
+    dv_ble_stopping = 0;
+    dv_ble_done = 1;
+    WakeConditionVariable(&dv_ble_cv);
+    LeaveCriticalSection(&dv_ble_cs);
+}
+
+static DWORD WINAPI dv_ble_worker(void* arg) {
+    (void)arg;
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        dv_ble_say("worker: cannot init COM at all");
+        EnterCriticalSection(&dv_ble_cs);
+        dv_ble_result = -1;
+        WakeConditionVariable(&dv_ble_cv);
+        LeaveCriticalSection(&dv_ble_cs);
+        return 0;
+    }
+    dv_ble_say(hr == RPC_E_CHANGED_MODE ? "worker: CHANGED MODE (poisoned?) — continuing"
+                                        : "worker: fresh MTA");
+    bool active = dv_ble_req_active != 0;
+    void* w = NULL;
+    bool started = false;
+
     static const wchar_t cls[] = L"Windows.Devices.Bluetooth.Advertisement.BluetoothLEAdvertisementWatcher";
     HSTRING h = NULL;
-    if (FAILED(WindowsCreateString(cls, (UINT32)(sizeof cls / 2 - 1), &h))) { return false; }
+    if (FAILED(WindowsCreateString(cls, (UINT32)(sizeof cls / 2 - 1), &h))) { goto fail; }
     void* actf = NULL;
-    HRESULT hr = RoGetActivationFactory(h, &dv_ble_iid_actf, &actf);
+    hr = RoGetActivationFactory(h, &dv_ble_iid_actf, &actf);
     WindowsDeleteString(h);
-    if (FAILED(hr) || !actf) { return false; }
+    if (FAILED(hr) || !actf) { dv_ble_say("no activation factory"); goto fail; }
     IInspectable* insp = NULL;
     hr = ((dv_ble_actfVtbl*)*(void**)actf)->ActivateInstance(actf, &insp);
     ((dv_ble_actfVtbl*)*(void**)actf)->Release(actf);
-    if (FAILED(hr) || !insp) { return false; }
+    if (FAILED(hr) || !insp) { dv_ble_say("no watcher instance"); goto fail; }
     dv_ble_say("factory made");
-    void* w = NULL;
     hr = ((dv_ble_actfVtbl*)*(void**)insp)->QueryInterface(insp, &dv_ble_iid_watcher, &w);
     ((dv_ble_actfVtbl*)*(void**)insp)->Release(insp);   // any IInspectable-shaped vtable: Release sits at slot 2
-    if (FAILED(hr) || !w) { return false; }
+    if (FAILED(hr) || !w) { dv_ble_say("QI to the watcher failed"); goto fail; }
+    dv_ble_say("watcher made");
 
     dv_ble_watcherVtbl* wv = *(dv_ble_watcherVtbl**)w;
     int64_t tr = 0, ts = 0;
-    dv_ble_say("watcher made");
-    if (FAILED(hr) || !w) { dv_ble_say("QI to the watcher failed"); }
-    dv_ble_stopping = 0;
     HRESULT hr1 = wv->put_ScanningMode(w, active ? 1 : 0);
     HRESULT hr2 = wv->add_Received(w, &dv_ble_recv_obj, &tr);
     HRESULT hr3 = wv->add_Stopped(w, &dv_ble_stop_obj, &ts);
@@ -591,44 +634,80 @@ static bool dv_ble_scan_start(bool active) {
         snprintf(why, sizeof why, "registration failed: mode=%08lx recv=%08lx stop=%08lx",
                  (unsigned long)hr1, (unsigned long)hr2, (unsigned long)hr3);
         dv_ble_say(why);
-        wv->remove_Received(w, tr);
-        wv->remove_Stopped(w, ts);
-        wv->Release(w);
-        return false;
+        goto fail;
     }
     dv_ble_tok_recv = tr;
     dv_ble_tok_stop = ts;
     dv_ble_say("handlers on");
-    if (FAILED(wv->Start(w))) {
-        wv->remove_Received(w, tr);
-        wv->remove_Stopped(w, ts);
-        wv->Release(w);
-        return false;
-    }
+    if (FAILED(wv->Start(w))) { dv_ble_say("Start failed"); goto fail; }
     int32_t st = 0;
     for (int i = 0; i < 60; i++) {                     // up to ~3 s for a slow radio (breaks on success)
         wv->get_Status(w, &st);
-        if (st == 1) { break; }                        // started
-        if (st == 4) {                                 // aborted: no radio / off / blocked
-            wv->remove_Received(w, tr);
-            wv->remove_Stopped(w, ts);
-            wv->Release(w);
-            return false;
-        }
+        if (st == 1) { break; }
+        if (st == 4) { dv_ble_say("start aborted (status 4): radio off/blocked"); goto fail; }
         Sleep(50);
     }
-    if (st != 1) {
-        wv->Stop(w);
-        wv->remove_Received(w, tr);
-        wv->remove_Stopped(w, ts);
-        wv->Release(w);
-        return false;
-    }
-    if (st == 4) { dv_ble_say("start aborted (status 4): radio off/blocked"); }
-    else if (st != 1) { dv_ble_say("start timed out: status not Started in 3 s"); }
-    else { dv_ble_say("STARTED"); }
+    if (st != 1) { dv_ble_say("start timed out: status not Started in 3 s"); goto fail; }
+    dv_ble_say("STARTED");
+
     dv_ble_w = w;
     dv_ble_watching = true;
+    started = true;
+    EnterCriticalSection(&dv_ble_cs);
+    dv_ble_result = 1;
+    WakeConditionVariable(&dv_ble_cv);
+    LeaveCriticalSection(&dv_ble_cs);
+
+    // serve until told to stop (or the radio aborts on its own — the Stopped handler says "off")
+    while (true) {
+        EnterCriticalSection(&dv_ble_cs);
+        while (!dv_ble_stop_req && dv_ble_watching) {
+            SleepConditionVariableCS(&dv_ble_wcv, &dv_ble_cs, 1000);
+        }
+        bool stop = dv_ble_stop_req != 0;
+        bool live = dv_ble_watching;
+        LeaveCriticalSection(&dv_ble_cs);
+        if (stop) { break; }
+        if (!live) {
+            dv_ble_say("worker: the radio aborted on its own, releasing");
+            break;
+        }
+    }
+
+fail:
+    dv_ble_worker_cleanup(w, started);
+    CoUninitialize();
+    return 0;
+}
+
+static bool dv_ble_scan_start(bool active) {
+    dv_ble_ensure();
+    if (dv_ble_thread) { dv_ble_scan_stop(); }
+    { char w[192];
+      snprintf(w, sizeof w, "scan_start: image=%p recv_obj=%p recv_vt=%p stop_obj=%p",
+               (void*)GetModuleHandleA(NULL), (void*)&dv_ble_recv_obj, (void*)dv_ble_recv_vt, (void*)&dv_ble_stop_obj);
+      dv_ble_say(w); }
+    EnterCriticalSection(&dv_ble_cs);
+    dv_ble_result = 0;
+    dv_ble_stop_req = 0;
+    dv_ble_done = 0;
+    dv_ble_req_active = active ? 1 : 0;
+    LeaveCriticalSection(&dv_ble_cs);
+    dv_ble_thread = CreateThread(NULL, 0, dv_ble_worker, NULL, 0, NULL);
+    if (!dv_ble_thread) { dv_ble_say("cannot create the worker thread"); return false; }
+    ULONGLONG dl = GetTickCount64() + 6000;
+    EnterCriticalSection(&dv_ble_cs);
+    while (!dv_ble_result && GetTickCount64() < dl) {
+        SleepConditionVariableCS(&dv_ble_cv, &dv_ble_cs, 100);
+    }
+    LONG r = dv_ble_result;
+    LeaveCriticalSection(&dv_ble_cs);
+    if (r != 1) {
+        dv_ble_say(r == -1 ? "scan did not start (the log above says where)"
+                           : "scan start timed out after 6 s");
+        dv_ble_scan_stop();                            // lets the worker clean up, closes the handle
+        return false;
+    }
     // drop a stale "off" of the dead session: it would be advice about a radio that is back
     dv_text tmp[DV_BLE_Q];
     int tn = 0;
@@ -646,26 +725,22 @@ static bool dv_ble_scan_start(bool active) {
 }
 
 static void dv_ble_scan_stop(void) {
-    if (!dv_ble_made || !dv_ble_w) { return; }
-    dv_ble_stopping = 1;                               // the Stopped event must not say "off"
-    void* w = dv_ble_w;
-    dv_ble_watcherVtbl* wv = *(dv_ble_watcherVtbl**)w;
-    if (dv_ble_watching) {
-        wv->remove_Received(w, dv_ble_tok_recv);
-        wv->remove_Stopped(w, dv_ble_tok_stop);
-        wv->Stop(w);
-        dv_ble_watching = 0;
-    }
-    // wait until the last callback left: a Release with a live callback would crash
-    ULONGLONG deadline = GetTickCount64() + 2000;
+    if (!dv_ble_made || !dv_ble_thread) { return; }
     EnterCriticalSection(&dv_ble_cs);
-    while (dv_ble_busy > 0 && GetTickCount64() < deadline) {
-        SleepConditionVariableCS(&dv_ble_cv, &dv_ble_cs, 50);
+    dv_ble_stop_req = 1;
+    WakeConditionVariable(&dv_ble_wcv);
+    LeaveCriticalSection(&dv_ble_cs);
+    ULONGLONG dl = GetTickCount64() + 3000;
+    EnterCriticalSection(&dv_ble_cs);
+    while (!dv_ble_done && GetTickCount64() < dl) {
+        SleepConditionVariableCS(&dv_ble_cv, &dv_ble_cs, 100);
     }
     LeaveCriticalSection(&dv_ble_cs);
-    wv->Release(w);
-    dv_ble_w = NULL;
-    dv_ble_stopping = 0;
+    if (!dv_ble_done) { dv_ble_say("stop: the worker did not finish in 3 s"); }
+    if (dv_ble_thread) { CloseHandle(dv_ble_thread); dv_ble_thread = NULL; }
+    EnterCriticalSection(&dv_ble_cs);
+    dv_ble_stop_req = 0;
+    LeaveCriticalSection(&dv_ble_cs);
 }
 
 static dv_text dv_ble_event(int64_t timeout) {
