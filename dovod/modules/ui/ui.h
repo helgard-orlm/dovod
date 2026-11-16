@@ -52,6 +52,7 @@ static const char dv_ui_page[] =
     "progress{width:100%;height:14px;accent-color:var(--acc)}\n"
     "input[type=range]{flex:1;min-width:140px;accent-color:var(--acc)}\n"
     ".sv{min-width:3ch;text-align:right;color:var(--mut)}\n"
+    ".row>.row{flex:1;flex-wrap:nowrap}\n"
     "#off{position:fixed;left:0;right:0;bottom:0;padding:8px;text-align:center;background:#b42318;color:#fff;display:none}\n"
     "</style></head><body><div id='app'></div><div id='off'>The program is not answering.</div>\n"
     "<script>\n"
