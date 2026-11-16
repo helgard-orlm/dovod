@@ -4,3 +4,4 @@ __pycache__/
 /hello
 /shapes
 /wordfreq
+build/

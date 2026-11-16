@@ -2,7 +2,7 @@
 # Dovod self-test: good programs must pass (also under sanitizers), bad ones must fail with the expected codes.
 cd "$(dirname "$0")/.." || exit 1
 fail=0
-for f in examples/hello.dv examples/shapes.dv examples/wordfreq.dv examples/bench.dv tests/stress.dv; do
+for f in examples/hello.dv examples/shapes.dv examples/wordfreq.dv examples/bench.dv examples/player.dv tests/stress.dv; do
   bin/dovod check "$f" >/dev/null 2>&1 || { echo "FAIL (should pass): $f"; fail=1; }
 done
 out=$(DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod run tests/stress.dv 2>&1)
@@ -23,5 +23,11 @@ bin/dovod check tests/vacuous/b_meaningful.dv >/dev/null 2>&1 || { echo "FAIL: a
 DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod check tests/regress_glm_review.dv >/dev/null 2>&1 || { echo "FAIL: regress_glm_review.dv"; fail=1; }
 bin/dovod trust tests/witness_shell/t.dv --witness tests/witness_shell/w.dv | grep -q "double    self-checked" || { echo "FAIL: shell witness counted"; fail=1; }
 for f in exam/runs/*/*/solution.dv; do bin/dovod check "$f" >/dev/null 2>&1 || { echo "FAIL (exam solution regressed): $f"; fail=1; }; done
+if command -v x86_64-w64-mingw32-gcc >/dev/null; then  # cross builds: a Windows .exe, GUI subsystem for `video`
+  t=$(mktemp -d)
+  bin/dovod build examples/player.dv --target win64 -o "$t/p" >/dev/null 2>&1 && file "$t/p.exe" | grep -q "(GUI), x86-64" || { echo "FAIL: win64 build of player.dv"; fail=1; }
+  bin/dovod build examples/wordfreq.dv --target win32 -o "$t/w" >/dev/null 2>&1 && file "$t/w.exe" | grep -q "(console), Intel i386" || { echo "FAIL: win32 build of wordfreq.dv"; fail=1; }
+  rm -f "$t"/p.exe "$t"/w.exe; rmdir "$t"
+fi
 [ $fail = 0 ] && echo "all tests passed"
 exit $fail

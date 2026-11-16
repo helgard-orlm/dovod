@@ -1,4 +1,4 @@
-# Dovod 0.1 — the whole language
+# Dovod 0.1.1 — the whole language
 
 Dovod ("довод": an argument, a piece of evidence) is a small compiled language designed for AI
 agents to write and for humans to trust. This file is the complete specification; read it once and
@@ -105,7 +105,7 @@ Rules:
   (if it was `self-checked`) or `witness-failed` (if any of those examples fails); `assumed` and
   `partial` stay as they are, with the witness result in the notes.
 
-Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand`.
+Effects: `io` (console) · `fs_read` · `fs_write` · `env` (arguments) · `clock` · `rand` · `video` (a window that plays media; Windows).
 There is no other way to reach the outside world, so the effects of `main` are the whole truth
 about what a program can do.
 
@@ -187,14 +187,29 @@ write_file(path, text) -> Bool       uses fs_write
 args() -> List[Text]                 uses env
 now_ms() -> Int                      uses clock
 rand_int(lo, hi) -> Int              uses rand      // inclusive
+
+video_open(path) -> Bool             uses video     // play a file in the window (made on first use)
+video_pick() -> Opt[Text]            uses video     // "Open file" dialog; none if cancelled
+video_event() -> Text                uses video     // waits ≤100 ms, returns ONE event (below)
+video_pause(Bool)  video_seek(ms)  video_volume(0..100)  video_mute(Bool)
+video_rate(25..400 percent)  video_fullscreen(Bool)       uses video
+video_pos() -> Int   video_len() -> Int                    uses video     // ms; 0 if unknown
+video_status(Text)  video_title(Text)                      uses video     // status strip, window title
 ```
+`video` events: `tick` (nothing happened) · `key:NAME` (`SPACE LEFT RIGHT UP DOWN PGUP PGDN HOME END
+ESC ENTER BACKSPACE F1..F12 [ ] + - , .`, letters `A`–`Z`, digits; `ctrl+`/`shift+` in front) ·
+`click` · `dblclick` · `wheel:up` · `wheel:down` · `drop:PATH` (several paths joined by `\n`) · `loaded` ·
+`ended` · `closed` (window close button) · `error:MESSAGE`. Unknown events may be added later: ignore them.
+`video` works in a Windows build (`dovod build FILE --target win64|win32`; playback by Media
+Foundation, part of Windows, so the .exe needs no DLLs). Elsewhere its calls trap; pure code still checks.
 
 ## Tools
 
 ```
 dovod check FILE [--json]   static checks + run all examples. Diagnostics: file:line:col, code, msg, fix.
 dovod run FILE [ARGS…]      check, compile (-O2), run
-dovod build FILE [-o OUT]   check, compile to a native binary
+dovod build FILE [-o OUT] [--target native|win64|win32]
+                            check, compile to a binary; win64/win32 = Windows .exe (needs MinGW)
 dovod trust FILE [--witness W.dv] [--json]
                             the ledger: capabilities, per-function status, what is taken on faith
 dovod card FILE             interface only: signatures, contracts, two examples each — hand this to
@@ -215,4 +230,4 @@ counted in the ledger's "rests on assumed".
 Runtime traps (the complete list): failed `need`/`give` · Int overflow (`+ - *`, unary `-`, `abs`) ·
 division by zero (`/`, `%`; Int and Float) · index/slice out of range (`xs[i]`, `byte`, `slice`) ·
 `pop` on an empty list · `trunc` of a Float outside Int range · `from_byte` outside 0..255 ·
-`split`/`replace` with an empty pattern · `rand_int` with lo > hi · out of memory · `trap(...)`.
+`split`/`replace` with an empty pattern · `rand_int` with lo > hi · `video_volume`/`video_rate` out of range · `video` outside Windows · out of memory · `trap(...)`.

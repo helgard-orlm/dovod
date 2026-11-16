@@ -23,6 +23,11 @@ SIMPLE = {
     'print': 'dv_print({0})', 'read_line': 'dv_read_line()', 'read_file': 'dv_read_file({0})',
     'write_file': 'dv_write_file({0}, {1})', 'args': 'dv_args()', 'now_ms': 'dv_now_ms()',
     'rand_int': 'dv_rand_int({0}, {1}, {L})',
+    'video_open': 'dv_video_open({0})', 'video_pick': 'dv_video_pick()', 'video_event': 'dv_video_event()',
+    'video_pause': 'dv_video_pause({0})', 'video_seek': 'dv_video_seek({0})', 'video_pos': 'dv_video_pos()',
+    'video_len': 'dv_video_len()', 'video_volume': 'dv_video_volume({0}, {L})', 'video_mute': 'dv_video_mute({0})',
+    'video_rate': 'dv_video_rate({0}, {L})', 'video_fullscreen': 'dv_video_fullscreen({0})',
+    'video_status': 'dv_video_status({0})', 'video_title': 'dv_video_title({0})',
 }
 
 
@@ -718,4 +723,6 @@ class CGen:
         types = self.gen_types()
         pre = open(os.path.join(HERE, 'rt_pre.h')).read()
         post = open(os.path.join(HERE, 'rt_post.h')).read()
+        if any('video' in f.uses for f in ck.fns.values()):
+            post += '\n' + open(os.path.join(HERE, 'rt_video.h')).read()
         return '\n'.join([pre] + covdef + mut + types + [post] + consts + protos + bodies + main) + '\n'

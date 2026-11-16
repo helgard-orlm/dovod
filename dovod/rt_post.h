@@ -46,8 +46,7 @@ static O_Text dv_read_line(void) {
 }
 static O_Text dv_read_file(dv_text path) {
     O_Text r = {0};
-    char* cp = dv_alloc((size_t)path.n + 1); memcpy(cp, path.p, (size_t)path.n); cp[path.n] = 0;
-    FILE* f = fopen(cp, "rb"); free(cp);
+    FILE* f = dv_open_path(path.p, path.n, 0);
     if (!f) return r;
     dv_buf b = {0}; char chunk[65536]; size_t n;
     while ((n = fread(chunk, 1, sizeof chunk, f)) > 0) dv_buf_put(&b, chunk, n);
@@ -57,6 +56,14 @@ static O_Text dv_read_file(dv_text path) {
 }
 static L_Text dv_args(void) {
     L_Text r = {0};
+#ifdef _WIN32
+    int wn = 0; wchar_t** wa = CommandLineToArgvW(GetCommandLineW(), &wn);  // argv in UTF-8, not the ANSI code page
+    if (wa) {
+        for (int i = 1; i < wn; i++) { char* u = dv_narrow(wa[i]); L_Text_push(&r, dv_text_new(u, (int64_t)strlen(u))); free(u); }
+        LocalFree(wa);
+        return r;
+    }
+#endif
     for (int i = 1; i < dv_argc; i++) L_Text_push(&r, dv_text_new(dv_argv[i], (int64_t)strlen(dv_argv[i])));
     return r;
 }

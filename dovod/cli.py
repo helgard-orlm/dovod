@@ -39,13 +39,25 @@ def load(path):
     return items
 
 
-def compile_c(csrc, out, opt):
+TARGETS = {'native': 'cc', 'win64': 'x86_64-w64-mingw32-gcc', 'win32': 'i686-w64-mingw32-gcc'}
+WIN_LIBS = ['-lshell32']
+VIDEO_LIBS = ['-lmfplay', '-lmfplat', '-lole32', '-lcomdlg32', '-lgdi32', '-luser32']
+
+
+def compile_c(csrc, out, opt, target='native', gui=False):
     cdir = os.path.dirname(out)
     cfile = os.path.join(cdir, os.path.basename(out) + '.c')
     with open(cfile, 'w') as f:
         f.write(csrc)
     extra = os.environ.get('DOVOD_CFLAGS', '').split()
-    r = subprocess.run(['cc', '-std=gnu11', opt, '-w'] + extra + ['-o', out, cfile, '-lm'],
+    cc = TARGETS[target]
+    if shutil.which(cc) is None:
+        raise SystemExit(f"target {target} needs the C compiler `{cc}` (Debian/Parrot: apt install mingw-w64)")
+    libs = ['-lm']
+    if target != 'native':
+        extra = extra + ['-static', '-s']   # one .exe, no MinGW DLLs next to it
+        libs = libs + WIN_LIBS + (VIDEO_LIBS + ['-mwindows'] if gui else [])
+    r = subprocess.run([cc, '-std=gnu11', opt, '-w'] + extra + ['-o', out, cfile] + libs,
                        capture_output=True, text=True)
     if r.returncode != 0:
         keep = os.path.join(tempfile.gettempdir(), 'dovod_failed.c')
@@ -319,11 +331,12 @@ def cmd_card(ck, path):
                 print(f"  assume \"{it.assume[0]}\"")
 
 
-def build(res, out, opt='-O2'):
+def build(res, out, opt='-O2', target='native'):
     if 'main' not in res.ck.fns:
         raise SystemExit("no `fn main()` in this program; nothing to run (use `dovod check` for libraries)")
     csrc = CGen(res.ck, 'run').program()
-    compile_c(csrc, out, opt)
+    gui = 'video' in res.ck.fns['main'].uses
+    compile_c(csrc, out, opt, target, gui)
     try:
         os.remove(out + '.c')
     except OSError:
@@ -333,7 +346,8 @@ def build(res, out, opt='-O2'):
 USAGE = """dovod — a language where code carries its evidence
   dovod check FILE [--json]     type-check, run every example, report
   dovod run   FILE [ARGS...]    check, compile, run
-  dovod build FILE [-o OUT]     check, compile to a native binary
+  dovod build FILE [-o OUT] [--target native|win64|win32]
+                                check, compile to a binary (win64/win32: a Windows .exe via MinGW)
   dovod trust FILE [--witness W.dv] [--json]
                                 ledger: what the program can do, what is checked, what is assumed;
                                 W.dv = examples by another author (`use`s FILE)
@@ -384,8 +398,13 @@ def main(argv=None):
     for d in res.warns:
         print(d.text(), file=sys.stderr)
     if cmd == 'build':
+        target = a[a.index('--target') + 1] if '--target' in a else 'native'
+        if target not in TARGETS:
+            raise SystemExit(f"unknown target `{target}`; targets: " + ', '.join(TARGETS))
         out = a[a.index('-o') + 1] if '-o' in a else os.path.splitext(os.path.basename(path))[0]
-        build(res, os.path.abspath(out))
+        if target != 'native' and not out.endswith('.exe'):
+            out += '.exe'
+        build(res, os.path.abspath(out), target=target)
         print(f"built {out}")
         return 0
     tmp = tempfile.mkdtemp(prefix='dovod_')

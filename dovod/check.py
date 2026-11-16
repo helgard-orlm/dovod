@@ -4,10 +4,11 @@ from .syntax import Diag
 
 ERR = '?'
 SCALARS = ('Int', 'Float', 'Bool', 'Text')
-EFFECTS = ('io', 'fs_read', 'fs_write', 'env', 'clock', 'rand')
+EFFECTS = ('io', 'fs_read', 'fs_write', 'env', 'clock', 'rand', 'video')
 EFFECT_DOC = {
     'io': 'read/write the console', 'fs_read': 'read files', 'fs_write': 'write files',
     'env': 'read command-line arguments', 'clock': 'read the clock', 'rand': 'use randomness',
+    'video': 'open a window and play media files (Windows)',
 }
 OI, OF, OT, LT = ('Opt', 'Int'), ('Opt', 'Float'), ('Opt', 'Text'), ('List', 'Text')
 
@@ -37,6 +38,19 @@ BUILTINS = {
     'args': ([], LT, 'env'),
     'now_ms': ([], 'Int', 'clock'),
     'rand_int': (['Int', 'Int'], 'Int', 'rand'),
+    'video_open': (['Text'], 'Bool', 'video'),
+    'video_pick': ([], OT, 'video'),
+    'video_event': ([], 'Text', 'video'),
+    'video_pause': (['Bool'], 'Void', 'video'),
+    'video_seek': (['Int'], 'Void', 'video'),
+    'video_pos': ([], 'Int', 'video'),
+    'video_len': ([], 'Int', 'video'),
+    'video_volume': (['Int'], 'Void', 'video'),
+    'video_mute': (['Bool'], 'Void', 'video'),
+    'video_rate': (['Int'], 'Void', 'video'),
+    'video_fullscreen': (['Bool'], 'Void', 'video'),
+    'video_status': (['Text'], 'Void', 'video'),
+    'video_title': (['Text'], 'Void', 'video'),
 }
 POLY = ('len', 'show', 'slice', 'or_else', 'abs', 'min', 'max')
 

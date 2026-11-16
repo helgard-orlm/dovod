@@ -7,6 +7,25 @@
 #include <math.h>
 #include <setjmp.h>
 #include <time.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <shellapi.h>
+// UTF-8 <-> UTF-16 for paths and arguments (Windows APIs speak UTF-16, Dovod Text is UTF-8)
+static wchar_t* dv_wide(const char* p, int64_t n) {
+    int k = MultiByteToWideChar(CP_UTF8, 0, p, (int)n, NULL, 0);
+    wchar_t* w = malloc(sizeof(wchar_t) * ((size_t)k + 1));
+    if (!w) { fputs("out of memory\n", stderr); exit(70); }
+    MultiByteToWideChar(CP_UTF8, 0, p, (int)n, w, k); w[k] = 0; return w;
+}
+static char* dv_narrow(const wchar_t* w) {
+    int k = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    char* p = malloc((size_t)k + 1);
+    if (!p) { fputs("out of memory\n", stderr); exit(70); }
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, p, k, NULL, NULL); p[k] = 0; return p;
+}
+#endif
 
 typedef struct { char* p; int64_t n; } dv_text;
 #define DV_LIT(s, n) ((dv_text){(char*)(s), (n)})
@@ -40,6 +59,14 @@ static void* dv_alloc(size_t n) {
     void* p = malloc(n ? n : 1);
     if (!p) dv_trap("out of memory", "runtime");
     return p;
+}
+static FILE* dv_open_path(const char* p, int64_t n, int writing) {
+#ifdef _WIN32
+    wchar_t* w = dv_wide(p, n); FILE* f = _wfopen(w, writing ? L"wb" : L"rb"); free(w); return f;
+#else
+    char* cp = dv_alloc((size_t)n + 1); memcpy(cp, p, (size_t)n); cp[n] = 0;
+    FILE* f = fopen(cp, writing ? "wb" : "rb"); free(cp); return f;
+#endif
 }
 
 // ---- checked integer arithmetic
@@ -121,19 +148,27 @@ static dv_text dv_text_perturb(dv_text a) { return dv_text_concat(a, DV_LIT("\x0
 // ---- effects with scalar results
 static void dv_print(dv_text t) { if (t.n) fwrite(t.p, 1, (size_t)t.n, stdout); fputc('\n', stdout); }
 static bool dv_write_file(dv_text path, dv_text data) {
-    char* cp = dv_alloc((size_t)path.n + 1); memcpy(cp, path.p, (size_t)path.n); cp[path.n] = 0;
-    FILE* f = fopen(cp, "wb"); free(cp);
+    FILE* f = dv_open_path(path.p, path.n, 1);
     if (!f) return false;
     bool ok = data.n == 0 || fwrite(data.p, 1, (size_t)data.n, f) == (size_t)data.n;
     if (fclose(f) != 0) ok = false;
     return ok;
 }
-static int64_t dv_now_ms(void) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
+static int64_t dv_now_ms(void) {
+#ifdef _WIN32
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);  // 100 ns since 1601
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (int64_t)((t - 116444736000000000ULL) / 10000);
+#else
+    struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
 static int64_t dv_rand_int(int64_t lo, int64_t hi, const char* loc) {
-    static int seeded = 0;
+    static uint64_t st = 0;  // xorshift64*, seeded from the clock (portable: no random()/srandom())
     if (lo > hi) dv_trap("rand_int: lo > hi", loc);
-    if (!seeded) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); srandom((unsigned)(ts.tv_nsec ^ ts.tv_sec)); seeded = 1; }
+    if (!st) { st = (uint64_t)dv_now_ms() * 0x9E3779B97F4A7C15ULL ^ (uint64_t)clock() ^ (uint64_t)(uintptr_t)&st; if (!st) st = 1; }
+    st ^= st >> 12; st ^= st << 25; st ^= st >> 27;
+    uint64_t r = st * 2685821657736338717ULL;
     uint64_t span = (uint64_t)hi - (uint64_t)lo + 1;
-    uint64_t r = ((uint64_t)random() << 31) ^ (uint64_t)random();
     return span == 0 ? (int64_t)r : (int64_t)((uint64_t)lo + r % span);
 }
