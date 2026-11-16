@@ -22,7 +22,7 @@ module relay                                   // first line of code; same as th
 effect relay "switch the mains relay"          // the effect(s) this module brings; shown in `trust`
 native "relay.h"                               // at most one native file
   targets native, win64                        // where that code exists (default: every target)
-  links "-lws2_32"                             // extra linker flags
+  links "-lws2_32" on win64                    // extra linker flags (`on ...` = only for these targets)
   gui                                          // Windows: build as a window program, not a console one
 
 extern fn relay_set(on: Bool) uses relay       // body = C function `dv_relay_set` in relay.h

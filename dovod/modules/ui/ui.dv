@@ -1,0 +1,242 @@
+// Module `ui`: a window (or a page) with buttons, fields and tables, drawn by the user's web browser.
+// The program describes the whole interface as a VALUE — a tree of `UiNode` — and shows it again after
+// every change. What is on screen is therefore a pure function of the program's state:
+//
+//   fn view(m: Model) -> UiNode          // pure: `ex view(start()) == UiCol(kids: [...])` pins the screen down
+//   fn update(m: Model, ev: UiEv) -> Model   // pure: what a click or a typed value does
+//
+//   fn main() uses ui {
+//     match ui_listen(0, false) {                 // 0 = any free port; false = this computer only
+//       none => { trap("cannot open a port") }
+//       some(_port) => { }
+//     }
+//     ui_window("My program")                     // opens the browser as an app window (or a tab)
+//     var m = start()
+//     ui_show(view(m))
+//     while true {
+//       let ev = ui_next()                        // waits at most 100 ms; UiTick = nothing happened
+//       if ev == UiClosed { break }
+//       if ev != UiTick { m = update(m, ev)  ui_show(view(m)) }     // (two lines in real code)
+//     }
+//   }
+//
+// One exe, no DLLs: the page is inside the program, which serves it on a local port.
+// `ui_listen(8080, true)` serves it to the local network instead (one shared screen for every visitor,
+// no password) — skip `ui_window` then. This is not a multi-user web site.
+// Every control has `id: Text` (what it is) and `arg: Int` (which one: a row number, 0 if there is one);
+// they come back in the event: `UiClick(id, arg) => { match id { "del" => { ... arg ... } else => { } } }`.
+// `UiChange.value` is the new text of a field or select, "true"/"false" for a check, the number for a slider.
+// UiClosed comes when no window/tab has shown the program for 5 s. It is advice: the program decides
+// whether to stop. Showing the same tree again costs nothing (the page is not redrawn).
+// Two browsers on one program see ONE shared screen; their clicks arrive in one stream.
+// The page is dumb on purpose: everything that decides anything is Dovod code here or in the program.
+// `UiHtml` puts raw HTML/SVG on the page (a chart, a picture): what it looks like is outside all evidence.
+module ui
+effect ui "show a window or page in a web browser and read what the user does there (opens a network port)"
+native "ui.h"
+  links "-lws2_32" on win64, win32
+
+enum UiNode {
+  UiText(text: Text)
+  UiHeading(text: Text)
+  UiButton(id: Text, arg: Int, label: Text)
+  UiInput(id: Text, arg: Int, value: Text, hint: Text)            // one line of text
+  UiCheck(id: Text, arg: Int, label: Text, on: Bool)
+  UiSlider(id: Text, arg: Int, value: Int, lo: Int, hi: Int)
+  UiSelect(id: Text, arg: Int, value: Text, options: List[Text])
+  UiProgress(value: Int, total: Int)
+  UiRow(kids: List[UiNode])                             // side by side
+  UiCol(kids: List[UiNode])                             // one under another
+  UiBox(title: Text, kids: List[UiNode])                // a framed group
+  UiTable(head: List[Text], rows: List[UiNode])         // each row is a UiRow; its kids are the cells
+  UiHtml(html: Text)
+}
+
+enum UiEv {
+  UiTick
+  UiOpened                        // a window/tab has loaded the page
+  UiClosed
+  UiClick(id: Text, arg: Int)
+  UiChange(id: Text, arg: Int, value: Text)
+}
+
+extern fn ui_listen(port: Int, lan: Bool) -> Opt[Int] uses ui     // the port really used; none = failed
+  need port >= 0 and port <= 65535
+extern fn ui_window(title: Text) uses ui
+extern fn ui_push(json: Text) uses ui                             // raw; prefer ui_show
+extern fn ui_event() -> Text uses ui                              // raw; prefer ui_next
+
+fn ui_hex(n: Int) -> Text
+  need n >= 0 and n <= 15
+  ex ui_hex(0) == "0"
+  ex ui_hex(9) == "9"
+  ex ui_hex(10) == "a"
+  ex ui_hex(15) == "f"
+{
+  return slice("0123456789abcdef", n, n + 1)
+}
+
+// Text -> the inside of a JSON string
+fn ui_esc(t: Text) -> Text
+  ex ui_esc("plain текст") == "plain текст"
+  ex ui_esc("a\"b\\c") == "a\\\"b\\\\c"
+  ex ui_esc("l1\nl2\t.") == "l1\\nl2\\t."
+  ex ui_esc("\x01\x1f ") == "\\u0001\\u001f "
+  ex ui_esc("\x10") == "\\u0010"
+  ex ui_esc("") == ""
+{
+  var out = ""
+  var from = 0
+  for i in 0..len(t) {
+    let b = byte(t, i)
+    if b == '"' or b == '\\' or b < 32 {
+      out = out + slice(t, from, i)
+      from = i + 1
+      match b {
+        '"' => { out = out + "\\\"" }
+        '\\' => { out = out + "\\\\" }
+        '\n' => { out = out + "\\n" }
+        '\t' => { out = out + "\\t" }
+        else => { out = out + "\\u00" + ui_hex(b / 16) + ui_hex(b % 16) }
+      }
+    }
+  }
+  return out + slice(t, from, len(t))
+}
+
+fn ui_str(t: Text) -> Text
+  ex ui_str("a\"b") == "\"a\\\"b\""
+{
+  return "\"" + ui_esc(t) + "\""
+}
+
+fn ui_ida(id: Text, arg: Int) -> Text
+  ex ui_ida("del", 3) == "\"id\":\"del\",\"arg\":3"
+  ex ui_ida("a\"b", -1) == "\"id\":\"a\\\"b\",\"arg\":-1"
+{
+  return "\"id\":" + ui_str(id) + ",\"arg\":" + show(arg)
+}
+
+fn ui_json_list(kids: List[UiNode]) -> Text
+  ex ui_json_list([]) == "[]"
+  ex ui_json_list([UiText(text: "a"), UiText(text: "b")]) == "[{\"t\":\"text\",\"text\":\"a\"},{\"t\":\"text\",\"text\":\"b\"}]"
+{
+  var parts: List[Text] = []
+  for k in kids {
+    parts.push(ui_json(k))
+  }
+  return "[" + join(parts, ",") + "]"
+}
+
+fn ui_json_texts(ts: List[Text]) -> Text
+  ex ui_json_texts([]) == "[]"
+  ex ui_json_texts(["a", "b\"c"]) == "[\"a\",\"b\\\"c\"]"
+{
+  var parts: List[Text] = []
+  for t in ts {
+    parts.push(ui_str(t))
+  }
+  return "[" + join(parts, ",") + "]"
+}
+
+// the tree as JSON, the form the page understands
+fn ui_json(n: UiNode) -> Text
+  ex ui_json(UiText(text: "hi")) == "{\"t\":\"text\",\"text\":\"hi\"}"
+  ex ui_json(UiHeading(text: "H")) == "{\"t\":\"heading\",\"text\":\"H\"}"
+  ex ui_json(UiButton(id: "ok", arg: 2, label: "OK")) == "{\"t\":\"button\",\"id\":\"ok\",\"arg\":2,\"label\":\"OK\"}"
+  ex ui_json(UiInput(id: "q", arg: 0, value: "v", hint: "h")) == "{\"t\":\"input\",\"id\":\"q\",\"arg\":0,\"value\":\"v\",\"hint\":\"h\"}"
+  ex ui_json(UiCheck(id: "c", arg: 1, label: "L", on: true)) == "{\"t\":\"check\",\"id\":\"c\",\"arg\":1,\"label\":\"L\",\"on\":true}"
+  ex ui_json(UiCheck(id: "c", arg: 1, label: "L", on: false)) == "{\"t\":\"check\",\"id\":\"c\",\"arg\":1,\"label\":\"L\",\"on\":false}"
+  ex ui_json(UiSlider(id: "s", arg: 0, value: 5, lo: 1, hi: 9)) == "{\"t\":\"slider\",\"id\":\"s\",\"arg\":0,\"value\":5,\"lo\":1,\"hi\":9}"
+  ex ui_json(UiSelect(id: "s", arg: 0, value: "b", options: ["a", "b"])) == "{\"t\":\"select\",\"id\":\"s\",\"arg\":0,\"value\":\"b\",\"options\":[\"a\",\"b\"]}"
+  ex ui_json(UiProgress(value: 3, total: 7)) == "{\"t\":\"progress\",\"value\":3,\"total\":7}"
+  ex ui_json(UiRow(kids: [UiText(text: "a")])) == "{\"t\":\"row\",\"kids\":[{\"t\":\"text\",\"text\":\"a\"}]}"
+  ex ui_json(UiCol(kids: [])) == "{\"t\":\"col\",\"kids\":[]}"
+  ex ui_json(UiBox(title: "T", kids: [])) == "{\"t\":\"box\",\"title\":\"T\",\"kids\":[]}"
+  ex ui_json(UiTable(head: ["A"], rows: [UiRow(kids: [])])) == "{\"t\":\"table\",\"head\":[\"A\"],\"rows\":[{\"t\":\"row\",\"kids\":[]}]}"
+  ex ui_json(UiHtml(html: "<b>")) == "{\"t\":\"html\",\"html\":\"<b>\"}"
+{
+  match n {
+    UiText(text) => { return "{\"t\":\"text\",\"text\":" + ui_str(text) + "}" }
+    UiHeading(text) => { return "{\"t\":\"heading\",\"text\":" + ui_str(text) + "}" }
+    UiButton(id, arg, label) => { return "{\"t\":\"button\"," + ui_ida(id, arg) + ",\"label\":" + ui_str(label) + "}" }
+    UiInput(id, arg, value, hint) => {
+      return "{\"t\":\"input\"," + ui_ida(id, arg) + ",\"value\":" + ui_str(value) + ",\"hint\":" + ui_str(hint) + "}"
+    }
+    UiCheck(id, arg, label, on) => {
+      var b = "false"
+      if on {
+        b = "true"
+      }
+      return "{\"t\":\"check\"," + ui_ida(id, arg) + ",\"label\":" + ui_str(label) + ",\"on\":" + b + "}"
+    }
+    UiSlider(id, arg, value, lo, hi) => {
+      return "{\"t\":\"slider\"," + ui_ida(id, arg) + ",\"value\":" + show(value) + ",\"lo\":" + show(lo) +
+             ",\"hi\":" + show(hi) + "}"
+    }
+    UiSelect(id, arg, value, options) => {
+      return "{\"t\":\"select\"," + ui_ida(id, arg) + ",\"value\":" + ui_str(value) + ",\"options\":" +
+             ui_json_texts(options) + "}"
+    }
+    UiProgress(value, total) => { return "{\"t\":\"progress\",\"value\":" + show(value) + ",\"total\":" + show(total) + "}" }
+    UiRow(kids) => { return "{\"t\":\"row\",\"kids\":" + ui_json_list(kids) + "}" }
+    UiCol(kids) => { return "{\"t\":\"col\",\"kids\":" + ui_json_list(kids) + "}" }
+    UiBox(title, kids) => { return "{\"t\":\"box\",\"title\":" + ui_str(title) + ",\"kids\":" + ui_json_list(kids) + "}" }
+    UiTable(head, rows) => {
+      return "{\"t\":\"table\",\"head\":" + ui_json_texts(head) + ",\"rows\":" + ui_json_list(rows) + "}"
+    }
+    UiHtml(html) => { return "{\"t\":\"html\",\"html\":" + ui_str(html) + "}" }
+  }
+}
+
+// a raw event from the page -> UiEv.  Raw forms: "click:ID\nARG" and "change:ID\nARG\nVALUE".
+fn ui_parse(raw: Text) -> UiEv
+  ex ui_parse("tick") == UiTick
+  ex ui_parse("opened") == UiOpened
+  ex ui_parse("closed") == UiClosed
+  ex ui_parse("click:del\n3") == UiClick(id: "del", arg: 3)
+  ex ui_parse("click:a:b\n-1") == UiClick(id: "a:b", arg: -1)
+  ex ui_parse("click:del") == UiTick
+  ex ui_parse("click:del\nx") == UiTick
+  ex ui_parse("change:name\n0\nAnna") == UiChange(id: "name", arg: 0, value: "Anna")
+  ex ui_parse("change:memo\n2\nline1\nline2") == UiChange(id: "memo", arg: 2, value: "line1\nline2")
+  ex ui_parse("change:x\n5\n") == UiChange(id: "x", arg: 5, value: "")
+  ex ui_parse("change:x\n5") == UiTick
+  ex ui_parse("change:x\nq\nv") == UiTick
+  ex ui_parse("clicked") == UiTick
+  ex ui_parse("something new") == UiTick
+{
+  if starts_with(raw, "click:") {
+    let parts = split(slice(raw, 6, len(raw)), "\n")
+    if len(parts) != 2 {
+      return UiTick
+    }
+    match parse_int(parts[1]) {
+      some(n) => { return UiClick(id: parts[0], arg: n) }
+      none => { return UiTick }
+    }
+  }
+  if starts_with(raw, "change:") {
+    let parts = split(slice(raw, 7, len(raw)), "\n")
+    if len(parts) < 3 {
+      return UiTick
+    }
+    match parse_int(parts[1]) {
+      some(n) => { return UiChange(id: parts[0], arg: n, value: join(slice(parts, 2, len(parts)), "\n")) }
+      none => { return UiTick }
+    }
+  }
+  match raw {
+    "opened" => { return UiOpened }
+    "closed" => { return UiClosed }
+    else => { return UiTick }      // unknown or malformed events are ignored: an older program keeps working
+  }
+}
+
+fn ui_show(n: UiNode) uses ui {
+  ui_push(ui_json(n))
+}
+
+fn ui_next() -> UiEv uses ui {
+  return ui_parse(ui_event())
+}

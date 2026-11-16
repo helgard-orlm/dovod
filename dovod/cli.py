@@ -87,7 +87,7 @@ def load(path):
                 m['native'] = os.path.join(m['dir'], it.path)
                 if not os.path.isfile(m['native']):
                     raise DvError(Diag('E-FILE', it.file, it.line, it.col, f"native file `{it.path}` not found next to the module"))
-                bad = [t for t in it.targets if t not in TARGETS]
+                bad = [t for t in it.targets + [t for _, only in it.links for t in (only or [])] if t not in TARGETS]
                 if bad:
                     raise DvError(Diag('E-MODULE', it.file, it.line, it.col, f"unknown target `{bad[0]}`",
                                        "targets: " + ', '.join(TARGETS)))
@@ -533,7 +533,8 @@ def build(res, out, opt='-O2', target='native'):
         raise SystemExit("no `fn main()` in this program; nothing to run (use `dovod check` for libraries)")
     csrc = CGen(res.ck, 'run', target).program()
     mods = [m for m in res.ck.modules.values() if m['native'] and target in m['targets']]
-    compile_c(csrc, out, opt, target, any(m['gui'] for m in mods), [l for m in mods for l in m['links']])
+    compile_c(csrc, out, opt, target, any(m['gui'] for m in mods),
+              [l for m in mods for l, only in m['links'] if only is None or target in only])
     try:
         os.remove(out + '.c')
     except OSError:

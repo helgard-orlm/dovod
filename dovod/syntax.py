@@ -223,10 +223,16 @@ class Parser:
                 n.targets.append(self.expect('id').val)
                 while self.accept('op', ','):
                     n.targets.append(self.expect('id').val)
-            else:
-                n.links.append(self.expect('str').val)
+            else:   # links "-lfoo", "-lbar" [on win64, win32]
+                flags, only = [self.expect('str').val], None
                 while self.accept('op', ','):
-                    n.links.append(self.expect('str').val)
+                    flags.append(self.expect('str').val)
+                if self.at('id', 'on'):
+                    self.next()
+                    only = [self.expect('id').val]
+                    while self.accept('op', ','):
+                        only.append(self.expect('id').val)
+                n.links.extend((f, only) for f in flags)
 
     def p_extern(self):
         self.next()

@@ -1,0 +1,289 @@
+// Prices — which pack is cheaper per kilo?  A small window program on the `ui` module.
+// Run:    dovod run examples/prices.dv            (opens a browser window)
+// Build:  dovod build examples/prices.dv --target win64     -> one .exe, no DLLs
+//
+// The whole screen is the pure function `view`; everything a click does is the pure function `update`.
+// `main` only carries events in and trees out.
+use ui
+
+record Item { name: Text, price: Text, grams: Text }       // as typed: may be empty or not a number
+record Model { items: List[Item], sorted: Bool }
+
+fn start() -> Model
+  ex len(start().items) == 2
+  ex start().sorted == false
+{
+  return Model(items: [Item(name: "Гречка 800 г", price: "62", grams: "800"),
+                       Item(name: "Гречка 1 кг", price: "71", grams: "1000")], sorted: false)
+}
+
+// price of one kilo in kopecks; none while the fields do not hold usable numbers
+fn per_kilo(it: Item) -> Opt[Int]
+  ex per_kilo(Item(name: "a", price: "62", grams: "800")) == some(7750)
+  ex per_kilo(Item(name: "a", price: "71", grams: "1000")) == some(7100)
+  ex per_kilo(Item(name: "a", price: " 5 ", grams: "1")) == some(500000)
+  ex per_kilo(Item(name: "a", price: "", grams: "800")) == none
+  ex per_kilo(Item(name: "a", price: "62", grams: "x")) == none
+  ex per_kilo(Item(name: "a", price: "62", grams: "0")) == none
+  ex per_kilo(Item(name: "a", price: "-1", grams: "5")) == none
+  ex per_kilo(Item(name: "a", price: "0", grams: "5")) == some(0)
+{
+  match parse_int(trim(it.price)) {
+    none => { return none }
+    some(p) => {
+      match parse_int(trim(it.grams)) {
+        none => { return none }
+        some(g) => {
+          if p < 0 or g <= 0 {
+            return none
+          }
+          return some(p * 100 * 1000 / g)
+        }
+      }
+    }
+  }
+}
+
+fn money(kop: Int) -> Text
+  need kop >= 0
+  ex money(7750) == "77.50 ₴"
+  ex money(7105) == "71.05 ₴"
+  ex money(9) == "0.09 ₴"
+  ex money(10) == "0.10 ₴"
+  ex money(0) == "0.00 ₴"
+{
+  var c = show(kop % 100)
+  if kop % 100 < 10 {
+    c = "0" + c
+  }
+  return show(kop / 100) + "." + c + " ₴"
+}
+
+// index of the cheapest item per kilo (the first one on a tie); none if no item has usable numbers
+fn best(items: List[Item]) -> Opt[Int]
+  ex best(start().items) == some(1)
+  ex best([]) == none
+  ex best([Item(name: "", price: "", grams: "")]) == none
+  ex best([Item(name: "", price: "5", grams: "1"), Item(name: "", price: "x", grams: "1"), Item(name: "", price: "4", grams: "1")]) == some(2)
+  ex best([Item(name: "", price: "4", grams: "1"), Item(name: "", price: "4", grams: "1")]) == some(0)
+{
+  var at: Opt[Int] = none
+  var low = 0
+  for i in 0..len(items) {
+    match per_kilo(items[i]) {
+      none => { }
+      some(k) => {
+        if at == none or k < low {
+          at = some(i)
+          low = k
+        }
+      }
+    }
+  }
+  return at
+}
+
+// the order rows are shown in: as entered, or cheapest first (rows without a price go last)
+fn order(m: Model) -> List[Int]
+  ex order(start()) == [0, 1]
+  ex order(start() with { sorted: true }) == [1, 0]
+  ex order(Model(items: [Item(name: "", price: "", grams: ""), Item(name: "", price: "9", grams: "1"),
+                         Item(name: "", price: "3", grams: "1"), Item(name: "", price: "3", grams: "1")], sorted: true)) == [2, 3, 1, 0]
+  ex order(Model(items: [], sorted: true)) == []
+{
+  var idx: List[Int] = []
+  for i in 0..len(m.items) {
+    idx.push(i)
+  }
+  if not m.sorted {
+    return idx
+  }
+  var out: List[Int] = []
+  var rest = m.items
+  var left = idx
+  while len(left) > 0 {
+    var pick = 0
+    match best(rest) {
+      some(b) => { pick = b }
+      none => { }
+    }
+    out.push(left[pick])
+    rest = slice(rest, 0, pick) + slice(rest, pick + 1, len(rest))
+    left = slice(left, 0, pick) + slice(left, pick + 1, len(left))
+  }
+  return out
+}
+
+fn row(m: Model, i: Int) -> UiNode
+  need i >= 0 and i < len(m.items)
+  ex row(start(), 1) == UiRow(kids: [
+       UiInput(id: "name", arg: 1, value: "Гречка 1 кг", hint: "что"),
+       UiInput(id: "price", arg: 1, value: "71", hint: "цена, ₴"),
+       UiInput(id: "grams", arg: 1, value: "1000", hint: "граммы"),
+       UiText(text: "71.00 ₴ за кг  ← дешевле"),
+       UiButton(id: "del", arg: 1, label: "Убрать")])
+  ex row(start(), 0) == UiRow(kids: [
+       UiInput(id: "name", arg: 0, value: "Гречка 800 г", hint: "что"),
+       UiInput(id: "price", arg: 0, value: "62", hint: "цена, ₴"),
+       UiInput(id: "grams", arg: 0, value: "800", hint: "граммы"),
+       UiText(text: "77.50 ₴ за кг"),
+       UiButton(id: "del", arg: 0, label: "Убрать")])
+  ex row(Model(items: [Item(name: "one", price: "3", grams: "1000")], sorted: false), 0) == UiRow(kids: [
+       UiInput(id: "name", arg: 0, value: "one", hint: "что"),
+       UiInput(id: "price", arg: 0, value: "3", hint: "цена, ₴"),
+       UiInput(id: "grams", arg: 0, value: "1000", hint: "граммы"),
+       UiText(text: "3.00 ₴ за кг"),
+       UiButton(id: "del", arg: 0, label: "Убрать")])                 // a single row is not "cheaper" than anything
+  ex row(Model(items: [Item(name: "", price: "", grams: "")], sorted: false), 0) == UiRow(kids: [
+       UiInput(id: "name", arg: 0, value: "", hint: "что"),
+       UiInput(id: "price", arg: 0, value: "", hint: "цена, ₴"),
+       UiInput(id: "grams", arg: 0, value: "", hint: "граммы"),
+       UiText(text: "—"),
+       UiButton(id: "del", arg: 0, label: "Убрать")])
+{
+  let it = m.items[i]
+  var note = "—"
+  match per_kilo(it) {
+    some(k) => {
+      note = money(k) + " за кг"
+      if best(m.items) == some(i) and len(m.items) > 1 {
+        note = note + "  ← дешевле"
+      }
+    }
+    none => { }
+  }
+  return UiRow(kids: [
+    UiInput(id: "name", arg: i, value: it.name, hint: "что"),
+    UiInput(id: "price", arg: i, value: it.price, hint: "цена, ₴"),
+    UiInput(id: "grams", arg: i, value: it.grams, hint: "граммы"),
+    UiText(text: note),
+    UiButton(id: "del", arg: i, label: "Убрать")])
+}
+
+fn view(m: Model) -> UiNode
+  ex view(Model(items: [], sorted: false)) == UiCol(kids: [
+       UiHeading(text: "Что дешевле за килограмм"),
+       UiTable(head: ["Товар", "Цена, ₴", "Граммы", "За кг", ""], rows: []),
+       UiRow(kids: [UiButton(id: "add", arg: 0, label: "Добавить строку"),
+                    UiCheck(id: "sort", arg: 0, label: "Сначала дешёвые", on: false)]),
+       UiText(text: "Добавьте товары, чтобы сравнить.")])
+  ex view(Model(items: [Item(name: "", price: "", grams: "")], sorted: false)) == UiCol(kids: [
+       UiHeading(text: "Что дешевле за килограмм"),
+       UiTable(head: ["Товар", "Цена, ₴", "Граммы", "За кг", ""],
+               rows: [row(Model(items: [Item(name: "", price: "", grams: "")], sorted: false), 0)]),
+       UiRow(kids: [UiButton(id: "add", arg: 0, label: "Добавить строку"),
+                    UiCheck(id: "sort", arg: 0, label: "Сначала дешёвые", on: false)]),
+       UiText(text: "Заполните цену и граммы.")])
+  ex view(start()) == UiCol(kids: [
+       UiHeading(text: "Что дешевле за килограмм"),
+       UiTable(head: ["Товар", "Цена, ₴", "Граммы", "За кг", ""], rows: [row(start(), 0), row(start(), 1)]),
+       UiRow(kids: [UiButton(id: "add", arg: 0, label: "Добавить строку"),
+                    UiCheck(id: "sort", arg: 0, label: "Сначала дешёвые", on: false)]),
+       UiText(text: "Дешевле всего: Гречка 1 кг")])
+  ex view(start() with { sorted: true }) == UiCol(kids: [
+       UiHeading(text: "Что дешевле за килограмм"),
+       UiTable(head: ["Товар", "Цена, ₴", "Граммы", "За кг", ""], rows: [row(start(), 1), row(start(), 0)]),
+       UiRow(kids: [UiButton(id: "add", arg: 0, label: "Добавить строку"),
+                    UiCheck(id: "sort", arg: 0, label: "Сначала дешёвые", on: true)]),
+       UiText(text: "Дешевле всего: Гречка 1 кг")])
+{
+  var rows: List[UiNode] = []
+  for i in order(m) {
+    rows.push(row(m, i))
+  }
+  var verdict = "Добавьте товары, чтобы сравнить."
+  if len(m.items) > 0 {
+    verdict = "Заполните цену и граммы."
+  }
+  match best(m.items) {
+    some(b) => { verdict = "Дешевле всего: " + m.items[b].name }
+    none => { }
+  }
+  return UiCol(kids: [
+    UiHeading(text: "Что дешевле за килограмм"),
+    UiTable(head: ["Товар", "Цена, ₴", "Граммы", "За кг", ""], rows: rows),
+    UiRow(kids: [UiButton(id: "add", arg: 0, label: "Добавить строку"),
+                 UiCheck(id: "sort", arg: 0, label: "Сначала дешёвые", on: m.sorted)]),
+    UiText(text: verdict)])
+}
+
+fn set_field(it: Item, field: Text, value: Text) -> Item
+  ex set_field(Item(name: "a", price: "1", grams: "2"), "name", "b") == Item(name: "b", price: "1", grams: "2")
+  ex set_field(Item(name: "a", price: "1", grams: "2"), "price", "9") == Item(name: "a", price: "9", grams: "2")
+  ex set_field(Item(name: "a", price: "1", grams: "2"), "grams", "7") == Item(name: "a", price: "1", grams: "7")
+  ex set_field(Item(name: "a", price: "1", grams: "2"), "other", "7") == Item(name: "a", price: "1", grams: "2")
+{
+  match field {
+    "name" => { return it with { name: value } }
+    "price" => { return it with { price: value } }
+    "grams" => { return it with { grams: value } }
+    else => { return it }
+  }
+}
+
+fn update(m: Model, ev: UiEv) -> Model
+  ex update(start(), UiClick(id: "add", arg: 0)).items == start().items + [Item(name: "", price: "", grams: "")]
+  ex update(start(), UiClick(id: "del", arg: 0)).items == [Item(name: "Гречка 1 кг", price: "71", grams: "1000")]
+  ex update(start(), UiClick(id: "del", arg: 1)).items == [Item(name: "Гречка 800 г", price: "62", grams: "800")]
+  ex update(start(), UiClick(id: "del", arg: 2)) == start()
+  ex update(start(), UiClick(id: "del", arg: -1)) == start()
+  ex update(start(), UiClick(id: "nope", arg: 0)) == start()
+  ex update(start(), UiChange(id: "sort", arg: 0, value: "true")) == start() with { sorted: true }
+  ex update(start() with { sorted: true }, UiChange(id: "sort", arg: 0, value: "false")) == start()
+  ex update(start(), UiChange(id: "price", arg: 1, value: "55")).items[1] == Item(name: "Гречка 1 кг", price: "55", grams: "1000")
+  ex update(start(), UiChange(id: "price", arg: 1, value: "55")).items[0] == start().items[0]
+  ex update(start(), UiChange(id: "name", arg: 0, value: "Рис")).items[0] == Item(name: "Рис", price: "62", grams: "800")
+  ex update(start(), UiChange(id: "price", arg: 2, value: "55")) == start()
+  ex update(start(), UiChange(id: "price", arg: -1, value: "55")) == start()
+  ex update(start(), UiTick) == start()
+  ex update(start(), UiOpened) == start()
+  ex update(start(), UiClosed) == start()
+{
+  match ev {
+    UiTick => { return m }
+    UiOpened => { return m }
+    UiClosed => { return m }
+    UiClick(id, arg) => {
+      match id {
+        "add" => { return m with { items: m.items + [Item(name: "", price: "", grams: "")] } }
+        "del" => {
+          if arg < 0 or arg >= len(m.items) {
+            return m
+          }
+          return m with { items: slice(m.items, 0, arg) + slice(m.items, arg + 1, len(m.items)) }
+        }
+        else => { return m }
+      }
+    }
+    UiChange(id, arg, value) => {
+      if id == "sort" {
+        return m with { sorted: value == "true" }
+      }
+      if arg < 0 or arg >= len(m.items) {
+        return m
+      }
+      var items = m.items
+      items[arg] = set_field(items[arg], id, value)
+      return m with { items: items }
+    }
+  }
+}
+
+fn main() uses io, ui {
+  match ui_listen(0, false) {
+    none => { trap("cannot open a local port for the window") }
+    some(port) => { print("Prices: http://127.0.0.1:" + show(port) + "/") }
+  }
+  ui_window("Что дешевле")
+  var m = start()
+  ui_show(view(m))
+  var open = true
+  while open {
+    let ev = ui_next()
+    if ev == UiClosed {
+      open = false
+    }
+    m = update(m, ev)
+    ui_show(view(m))
+  }
+}

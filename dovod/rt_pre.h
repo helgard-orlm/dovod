@@ -146,7 +146,7 @@ static inline bool dv_bool_perturb(bool a) { return !a; }
 static dv_text dv_text_perturb(dv_text a) { return dv_text_concat(a, DV_LIT("\x01", 1)); }
 
 // ---- effects with scalar results
-static void dv_print(dv_text t) { if (t.n) fwrite(t.p, 1, (size_t)t.n, stdout); fputc('\n', stdout); }
+static void dv_print(dv_text t) { if (t.n) fwrite(t.p, 1, (size_t)t.n, stdout); fputc('\n', stdout); fflush(stdout); }
 static bool dv_write_file(dv_text path, dv_text data) {
     FILE* f = dv_open_path(path.p, path.n, 1);
     if (!f) return false;

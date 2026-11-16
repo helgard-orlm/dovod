@@ -1,0 +1,105 @@
+<!doctype html>
+<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>Dovod</title>
+<style>
+:root{--bg:#f6f7f9;--fg:#1c1f24;--mut:#667085;--card:#fff;--line:#d9dde3;--acc:#2563eb;--accfg:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#15171a;--fg:#e7e9ec;--mut:#98a2b3;--card:#1e2126;--line:#353a42;--acc:#4f8cff;--accfg:#fff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,'Segoe UI',Roboto,sans-serif}
+#app{max-width:1100px;margin:0 auto;padding:16px}
+.col{display:flex;flex-direction:column;gap:10px}
+.row{display:flex;flex-direction:row;gap:10px;align-items:center;flex-wrap:wrap}
+h2{margin:6px 0 2px;font-size:20px}
+p{margin:0;white-space:pre-wrap}
+button{font:inherit;padding:6px 14px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
+button:hover{border-color:var(--acc)}
+button:active{background:var(--acc);color:var(--accfg)}
+input[type=text],select{font:inherit;padding:6px 9px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);min-width:120px}
+input[type=text]{flex:1}
+input:focus,select:focus,button:focus-visible{outline:2px solid var(--acc);outline-offset:1px}
+label{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+fieldset{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:12px;margin:0;min-width:0}
+legend{padding:0 6px;color:var(--mut);font-size:13px}
+table{border-collapse:collapse;width:100%}
+th,td{text-align:left;padding:6px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--mut);font-weight:600;font-size:13px}
+progress{width:100%;height:14px;accent-color:var(--acc)}
+input[type=range]{flex:1;min-width:140px;accent-color:var(--acc)}
+.sv{min-width:3ch;text-align:right;color:var(--mut)}
+#off{position:fixed;left:0;right:0;bottom:0;padding:8px;text-align:center;background:#b42318;color:#fff;display:none}
+</style></head><body><div id='app'></div><div id='off'>The program is not answering.</div>
+<script>
+var ver = 0, sent = {}, chain = Promise.resolve(), drag = false, pending = null;
+function send(s) { chain = chain.then(function () { return fetch('/event', {method: 'POST', body: s}); }).catch(function () {}); }
+function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
+function key(n) { return n.id + '\n' + n.arg; }
+function change(n, v) { sent[key(n)] = v; send('change:' + key(n) + '\n' + v); }
+function kids(parent, list, keep) { for (var i = 0; i < list.length; i++) parent.appendChild(build(list[i], keep)); return parent; }
+function build(n, keep) {
+  var e, i;
+  switch (n.t) {
+    case 'text': return el('p', '', n.text);
+    case 'heading': return el('h2', '', n.text);
+    case 'button': e = el('button', '', n.label); e.dataset.id = key(n); e.onclick = function () { send('click:' + key(n)); }; return e;
+    case 'input':
+      e = el('input'); e.type = 'text'; e.dataset.id = key(n); e.placeholder = n.hint;
+      e.value = (keep && keep.id === key(n) && n.value === sent[key(n)]) ? keep.value : n.value;
+      e.oninput = function () { change(n, e.value); }; return e;
+    case 'check':
+      e = el('label'); var c = el('input'); c.type = 'checkbox'; c.checked = n.on; c.dataset.id = key(n);
+      c.onchange = function () { change(n, c.checked ? 'true' : 'false'); };
+      e.appendChild(c); e.appendChild(document.createTextNode(n.label)); return e;
+    case 'slider':
+      e = el('div', 'row'); var r = el('input'); r.type = 'range'; r.min = n.lo; r.max = n.hi; r.value = n.value; r.dataset.id = key(n);
+      var sv = el('span', 'sv', String(n.value));
+      r.onpointerdown = function () { drag = true; };
+      r.oninput = function () { sv.textContent = r.value; change(n, r.value); };
+      e.appendChild(r); e.appendChild(sv); return e;
+    case 'select':
+      e = el('select'); e.dataset.id = key(n);
+      for (i = 0; i < n.options.length; i++) { var o = el('option', '', n.options[i]); o.value = n.options[i]; e.appendChild(o); }
+      e.value = n.value; e.onchange = function () { change(n, e.value); }; return e;
+    case 'progress': e = el('progress'); e.max = n.total; e.value = n.value; return e;
+    case 'row': return kids(el('div', 'row'), n.kids, keep);
+    case 'col': return kids(el('div', 'col'), n.kids, keep);
+    case 'box': e = el('fieldset', 'col'); if (n.title) e.appendChild(el('legend', '', n.title)); return kids(e, n.kids, keep);
+    case 'table':
+      e = el('table'); var tr = el('tr');
+      for (i = 0; i < n.head.length; i++) tr.appendChild(el('th', '', n.head[i]));
+      e.appendChild(tr);
+      for (i = 0; i < n.rows.length; i++) {
+        tr = el('tr'); var cells = n.rows[i].kids || [n.rows[i]];
+        for (var j = 0; j < cells.length; j++) { var td = el('td'); td.appendChild(build(cells[j], keep)); tr.appendChild(td); }
+        e.appendChild(tr);
+      }
+      return e;
+    case 'html': e = el('div'); e.innerHTML = n.html; return e;
+  }
+  return el('p', '', '[unknown: ' + n.t + ']');
+}
+function render(tree) {
+  if (drag) { pending = tree; return; }   // do not pull a slider out from under the finger
+  var a = document.activeElement, keep = null, app = document.getElementById('app');
+  if (a && a.dataset && a.dataset.id) keep = {id: a.dataset.id, value: a.value, s: a.selectionStart, e: a.selectionEnd};
+  var fresh = build(tree, keep);
+  app.textContent = ''; app.appendChild(fresh);
+  if (keep) {
+    var all = app.querySelectorAll('[data-id]');
+    for (var i = 0; i < all.length; i++) if (all[i].dataset.id === keep.id) {
+      all[i].focus();
+      if (all[i].type === 'text' && keep.s !== null) { try { all[i].setSelectionRange(keep.s, keep.e); } catch (x) {} }
+      break;
+    }
+  }
+}
+function poll() {
+  fetch('/view?v=' + ver).then(function (r) { return r.json(); }).then(function (j) {
+    document.getElementById('off').style.display = 'none';
+    if (j.title) document.title = j.title;
+    if (j.tree) { ver = j.v; render(j.tree); }
+    poll();
+  }).catch(function () { document.getElementById('off').style.display = 'block'; setTimeout(poll, 700); });
+}
+window.addEventListener('pointerup', function () { if (drag) { drag = false; if (pending) { var t = pending; pending = null; render(t); } } });
+poll();
+</script></body></html>
