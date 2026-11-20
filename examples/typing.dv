@@ -1,0 +1,1301 @@
+// Typing trainer: touch typing in English and Russian. A window program on the `ui` module.
+// Run:    dovod run examples/typing.dv               (opens a browser window)
+// Build:  dovod build examples/typing.dv --target win64     -> one .exe, no DLLs
+//
+// A run of a lesson is a few lines picked at random from the lesson's words; you type them in the field,
+// the line above shows every letter green (right), red (wrong) or under the cursor. A wrong letter has to be
+// erased before the line counts. Speed counts only correct characters, from the first key to the last.
+// Lessons go row by row (home, top, bottom), then capitals, digits, common words, whole sentences.
+// The on-screen keyboard with the next key lit is a crutch, so it is off until you switch it on.
+// Best results per lesson are kept in typing_records.txt next to where the program is started.
+//
+// Everything that decides anything is pure (`update`, `view`); `main` only carries events and the file.
+use ui
+
+const width: Int = 44              // a line of words is at most this many characters
+const lines_per_run: Int = 4
+const records_file: Text = "typing_records.txt"
+
+record Lesson {
+  title: Text
+  keys: Text                       // every character the lesson may use (besides the space)
+  pool: List[Text]                 // words, or whole lines when `whole`
+  whole: Bool
+}
+
+record Best { key: Text, cpm: Int, acc: Int }
+
+record KeyPos { row: Int, col: Int, shift: Bool }
+
+record Model {
+  lang: Int                        // 0 English, 1 Russian
+  lesson: Int
+  lines: List[Text]
+  line: Int                        // the line being typed (the last one once finished)
+  typed: Text                      // what is in the field now
+  keys: Int                        // characters added by the user, right or wrong
+  errors: Int                      // characters added that did not match
+  start: Int                       // ms of the first key; -1 = not started
+  finish: Int                      // ms the last line was done; -1 = still typing
+  run: Int                         // grows with every new run: the field gets a new key and the page focuses it
+  hint: Bool
+  best: List[Best]
+}
+
+// ---------------------------------------------------------------- text as characters (UTF-8)
+
+fn is_start(b: Int) -> Bool
+  ex is_start(97) == true
+  ex is_start(127) == true
+  ex is_start(128) == false
+  ex is_start(191) == false
+  ex is_start(192) == true
+  ex is_start(208) == true
+{
+  return b < 128 or b >= 192
+}
+
+fn chars(t: Text) -> List[Text]
+  ex chars("ab") == ["a", "b"]
+  ex chars("жа б") == ["ж", "а", " ", "б"]
+  ex chars("a€b") == ["a", "€", "b"]
+  ex chars("ё") == ["ё"]
+  ex chars("") == []
+{
+  var out: List[Text] = []
+  var from = 0
+  for i in 1..len(t) {
+    if is_start(byte(t, i)) {
+      out.push(slice(t, from, i))
+      from = i
+    }
+  }
+  if len(t) > 0 {
+    out.push(slice(t, from, len(t)))
+  }
+  return out
+}
+
+fn clen(t: Text) -> Int
+  ex clen("привет") == 6
+  ex clen("hi") == 2
+  ex clen("") == 0
+{
+  return len(chars(t))
+}
+
+fn html_esc(t: Text) -> Text
+  ex html_esc("a<b>&\"c\"") == "a&lt;b&gt;&amp;&quot;c&quot;"
+  ex html_esc("ж;") == "ж;"
+{
+  return replace(replace(replace(replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+}
+
+// ---------------------------------------------------------------- lessons
+
+fn en_lessons() -> List[Lesson]
+  ex len(en_lessons()) == 8
+  ex en_lessons()[0].title == "1. Основной ряд: asdf jkl;"
+  ex wholes(en_lessons()) == [false, false, false, false, false, false, false, true]
+{
+  return [
+    Lesson(title: "1. Основной ряд: asdf jkl;", keys: "asdfjkl;", whole: false,
+           pool: ["fj", "jf", "dk", "kd", "sl", "ls", "a;", ";a", "fjdk", "asdf", "jkl;", "sad", "dad", "add",
+                  "fall", "all", "ask", "lass", "alas", "flask", "falls", "salad", "lads", "fads", "ads", "asks", "lad"]),
+    Lesson(title: "2. + g h e i", keys: "asdfghjkl;ei", whole: false,
+           pool: ["he", "she", "his", "hide", "like", "life", "file", "feel", "seed", "idea", "side", "head", "sea",
+                  "see", "shelf", "field", "fish", "dial", "glide", "hike", "kid", "lid", "aid", "said", "is", "if",
+                  "leg", "egg", "high", "sigh", "gas", "had", "has", "half", "hall", "glad", "flag", "dash", "shall",
+                  "flash", "glass"]),
+    Lesson(title: "3. Верхний ряд: q w r t y u o p", keys: "asdfghjkl;eiqwrtyuop", whole: false,
+           pool: ["the", "you", "type", "power", "quiet", "water", "pretty", "tower", "people", "story", "quote",
+                  "world", "yellow", "happy", "photo", "quarter", "tea", "top", "why", "write", "keep", "tool", "your",
+                  "their", "there", "would", "other", "out", "fruit", "guitar", "purple", "soup", "tree", "forty",
+                  "pilot", "route", "quest", "sport", "truth", "yogurt"]),
+    Lesson(title: "4. Нижний ряд: z x c v b n m , .", keys: "asdfghjkl;eiqwrtyuopzxcvbnm,.", whole: false,
+           pool: ["zero", "box", "cave", "big", "name", "move", "can", "next", "back", "comb", "brave", "civic",
+                  "mix", "lazy", "vivid", "number", "machine", "zone", "jazz", "exam", "and", "not", "many", "come",
+                  "become", "in", "on", "been", "common", "modern", "navy", "minimum", "yes,", "no.", "calm,", "done."]),
+    Lesson(title: "5. Заглавные и знаки", keys: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,.!?'\"-:;", whole: false,
+           pool: ["Hello,", "Yes!", "No?", "London", "Paris", "Monday", "Friday", "I", "I'm", "It's", "Don't", "OK.",
+                  "Kyiv", "Berlin", "Tokyo", "Anna", "John", "Mary", "Max", "Zoe", "Quick!", "Why?", "\"Wow\"",
+                  "Well-done", "Note:", "Wait;"]),
+    Lesson(title: "6. Цифры", keys: "0123456789.:%", whole: false,
+           pool: ["10", "25", "365", "1984", "2026", "42", "7", "100", "12:30", "50%", "3.14", "9", "800", "64",
+                  "1024", "77", "0.5", "13:45", "2048", "90%", "1", "6", "8"]),
+    Lesson(title: "7. Частые слова", keys: "abcdefghijklmnopqrstuvwxyz", whole: false,
+           pool: split("the of and to in is you that it he was for on are as with his they at be this have from or " +
+                       "one had by word but not what all were we when your can said there use an each which she do " +
+                       "how their if will up other about out many then them these so some her would make like him " +
+                       "into time has look two more write go see number no way could people my than first water been " +
+                       "call who now find long down day did get come made may part", " ")),
+    Lesson(title: "8. Предложения", keys: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ,.!?'\"-:;", whole: true,
+           pool: ["The quick brown fox jumps over the lazy dog.",
+                  "Pack my box with five dozen liquor jugs.",
+                  "Sphinx of black quartz, judge my vow.",
+                  "How vexingly quick daft zebras jump!",
+                  "Keep your eyes on the screen, not on the keys.",
+                  "Small steps every day make fast hands.",
+                  "Accuracy first; speed will follow.",
+                  "Rain on the window sounds like soft typing.",
+                  "A good cup of tea makes the morning better.",
+                  "Every key has a home, and your fingers know it."])]
+}
+
+fn ru_lessons() -> List[Lesson]
+  ex len(ru_lessons()) == 8
+  ex ru_lessons()[0].title == "1. Основной ряд: фыва олдж"
+  ex wholes(ru_lessons()) == [false, false, false, false, false, false, false, true]
+{
+  return [
+    Lesson(title: "1. Основной ряд: фыва олдж", keys: "фываолдж", whole: false,
+           pool: ["ао", "оа", "вл", "лв", "ыд", "ды", "фж", "жф", "фыва", "олдж", "вал", "дал", "лад", "дол", "вол",
+                  "лава", "вода", "выл", "выла", "давал", "ложа", "жал", "жало", "ждал", "овал", "вдова", "два", "лов",
+                  "алло"]),
+    Lesson(title: "2. + п р э", keys: "фывапролджэ", whole: false,
+           pool: ["пар", "пора", "жара", "рад", "дар", "пол", "лапа", "папа", "провал", "дрова", "фара", "эра",
+                  "впадал", "орда", "права", "порвал", "пропал", "пожар", "парад", "подвал", "провода", "оправа",
+                  "дрожал", "вдова"]),
+    Lesson(title: "3. Верхний ряд: йцукен гшщзхъ", keys: "фывапролджэйцукенгшщзхъ", whole: false,
+           pool: ["город", "рука", "нога", "окно", "кенгуру", "щука", "лужа", "жук", "лук", "хорошо", "зеркало",
+                  "звук", "шкаф", "щенок", "дерево", "погода", "заход", "наш", "ваш", "его", "она", "он", "уже",
+                  "подъезд", "гнездо", "зерно", "кузнец", "герой", "огурец", "ложка", "порошок", "озеро", "ведро",
+                  "новый", "край", "война", "дружно", "наука", "покупка"]),
+    Lesson(title: "4. Нижний ряд: ячсмить бю .", keys: "фывапролджэйцукенгшщзхъячсмитьбю.", whole: false,
+           pool: ["мяч", "семья", "тишина", "тюльпан", "бумага", "часы", "мост", "истина", "ночь", "чай", "яблоко",
+                  "сюрприз", "мечта", "сметана", "листья", "бабочка", "юмор", "письмо", "твой", "читать", "собака",
+                  "имя", "молоко", "утро", "вечер", "память", "любовь", "учитель", "книга", "белый", "конец.", "итог."]),
+    Lesson(title: "5. Заглавные и знаки",
+           keys: "йцукенгшщзхъфывапролджэячсмитьбюЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,.!?\"-:;", whole: false,
+           pool: ["Привет,", "Да!", "Нет.", "Как?", "Почему?", "Иван", "Мария", "Ольга", "Андрей", "Наталья",
+                  "Харьков", "Одесса", "Львов", "Днепр", "Сумы", "Киев", "Понедельник", "Пятница", "Ура!", "Внимание:",
+                  "\"Тише\"", "Кто-то", "Что-нибудь", "Итак;", "Хорошо.", "Спасибо!"]),
+    Lesson(title: "6. Цифры", keys: "0123456789,:%", whole: false,
+           pool: ["10", "25", "365", "1984", "2026", "42", "7", "100", "12:30", "50%", "3,14", "9", "800", "64",
+                  "1024", "77", "0,5", "13:45", "2048", "90%", "1", "6", "8"]),
+    Lesson(title: "7. Частые слова", keys: "йцукенгшщзхъфывапролджэячсмитьбю", whole: false,
+           pool: split("и в не на я быть он с что а по это она этот к но они мы как из у который то за свой весь год " +
+                       "от так о для ты же все тот мочь вы человек такой его сказать только или бы себя один уже до " +
+                       "время если сам когда другой вот говорить наш мой знать стать при чтобы дело жизнь кто первый " +
+                       "очень два день новый рука даже во со раз где там под можно ну какой после их работа без " +
+                       "самый потом надо хотеть ли слово идти большой должен место иметь", " ")),
+    Lesson(title: "8. Предложения",
+           keys: "ёйцукенгшщзхъфывапролджэячсмитьбюЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,.!?\"-:;", whole: true,
+           pool: ["Съешь же ещё этих мягких французских булок, да выпей чаю.",
+                  "В чащах юга жил бы цитрус? Да, но фальшивый экземпляр!",
+                  "Не смотри на клавиши, смотри на текст.",
+                  "Пальцы помнят дорогу, если глаза смотрят на экран.",
+                  "Тише едешь, дальше будешь.",
+                  "Утро начинается с чашки горячего чая.",
+                  "Каждый день понемногу, и руки станут быстрыми.",
+                  "За окном идёт тихий осенний дождь.",
+                  "Сначала точность, потом скорость.",
+                  "Хорошая работа любит спокойные руки."])]
+}
+
+fn lessons(lang: Int) -> List[Lesson]
+  ex lessons(0) == en_lessons()
+  ex lessons(1) == ru_lessons()
+{
+  if lang == 1 {
+    return ru_lessons()
+  }
+  return en_lessons()
+}
+
+// every character a lesson uses but does not teach yet — must be none: a lesson never asks for a key it has not taught
+fn strays(ls: List[Lesson]) -> List[Text]
+  ex strays([Lesson(title: "t", keys: "ab", pool: ["ab a", "c"], whole: false)]) == ["t: c"]
+  ex strays([Lesson(title: "t", keys: "аб", pool: ["ба а"], whole: true)]) == []
+  ex strays(en_lessons()) == []
+  ex strays(ru_lessons()) == []
+{
+  var out: List[Text] = []
+  for l in ls {
+    for w in l.pool {
+      for c in chars(w) {
+        if c != " " and not contains(l.keys, c) {
+          out.push(l.title + ": " + c)
+        }
+      }
+    }
+  }
+  return out
+}
+
+fn wholes(ls: List[Lesson]) -> List[Bool]
+  ex wholes([Lesson(title: "a", keys: "", pool: ["x"], whole: false), Lesson(title: "b", keys: "", pool: ["x"], whole: true)]) == [false, true]
+  ex wholes([]) == []
+{
+  var out: List[Bool] = []
+  for l in ls {
+    out.push(l.whole)
+  }
+  return out
+}
+
+fn titles(ls: List[Lesson]) -> List[Text]
+  ex titles([]) == []
+  ex titles([Lesson(title: "a", keys: "", pool: ["x"], whole: false), Lesson(title: "b", keys: "", pool: ["x"], whole: true)]) == ["a", "b"]
+{
+  var out: List[Text] = []
+  for l in ls {
+    out.push(l.title)
+  }
+  return out
+}
+
+fn index_of(xs: List[Text], x: Text) -> Opt[Int]
+  ex index_of(["a", "b", "b"], "b") == some(1)
+  ex index_of(["a"], "a") == some(0)
+  ex index_of(["a"], "c") == none
+{
+  for i in 0..len(xs) {
+    if xs[i] == x {
+      return some(i)
+    }
+  }
+  return none
+}
+
+// ---------------------------------------------------------------- random lines (pure: the seed comes in)
+
+fn rnd(seed: Int) -> Int
+  need seed >= 0 and seed < 2147483648
+  give out >= 0 and out < 2147483648
+  ex rnd(0) == 12345
+  ex rnd(1) == 1103527590
+  ex rnd(2147483647) == 1043980748
+{
+  return (seed * 1103515245 + 12345) % 2147483648
+}
+
+// an index below n from the high bits of s (the low bits of this generator are weak); never `prev` twice running
+fn pick(s: Int, n: Int, prev: Int) -> Int
+  need n > 0 and s >= 0
+  ex pick(0, 5, -1) == 0
+  ex pick(196608, 5, -1) == 3
+  ex pick(196608, 5, 3) == 4
+  ex pick(262144, 5, 4) == 0
+  ex pick(196608, 1, 0) == 0
+  ex pick(65535, 5, -1) == 0
+{
+  let i = (s / 65536) % n
+  if i == prev and n > 1 {
+    return (i + 1) % n
+  }
+  return i
+}
+
+fn make_lines(l: Lesson, seed: Int, count: Int) -> List[Text]
+  need count >= 0 and len(l.pool) > 0 and seed >= 0
+  ex make_lines(Lesson(title: "", keys: "", pool: ["ab", "cd"], whole: true), 0, 3) == ["ab", "cd", "ab"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["aaaaaaaaaa", "bbbbbbbbbb"], whole: false), 0, 2) ==
+     ["aaaaaaaaaa bbbbbbbbbb aaaaaaaaaa bbbbbbbbbb", "aaaaaaaaaa bbbbbbbbbb aaaaaaaaaa bbbbbbbbbb"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["жжжжжжжжжжжжжжжжжжжжж"], whole: false), 5, 1) ==
+     ["жжжжжжжжжжжжжжжжжжжжж жжжжжжжжжжжжжжжжжжжжж"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["ab"], whole: true), 9, 0) == []
+  ex len(make_lines(en_lessons()[0], 123456789, 4)) == 4
+  ex make_lines(Lesson(title: "", keys: "", pool: ["a", "bb", "ccc", "dddd", "eeeee"], whole: true), 77, 4) == ["ccc", "a", "eeeee", "a"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["a", "bb", "ccc", "dddddddddd", "eeeeeeeeeeeeeeeeeeee"], whole: false), 3, 3) ==
+     ["ccc dddddddddd a ccc dddddddddd bb", "dddddddddd ccc dddddddddd", "bb dddddddddd a dddddddddd a ccc"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["a", "bb"], whole: true), 2147483648, 2) == ["a", "bb"]
+  ex make_lines(Lesson(title: "", keys: "", pool: ["aaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbb"], whole: false), 1, 1) == ["aaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbb"]
+{
+  var out: List[Text] = []
+  var s = seed % 2147483648
+  var prev = -1
+  while len(out) < count {
+    if l.whole {
+      s = rnd(s)
+      prev = pick(s, len(l.pool), prev)
+      out.push(l.pool[prev])
+    } else {
+      var line = ""
+      var full = false
+      while not full {
+        s = rnd(s)
+        let i = pick(s, len(l.pool), prev)
+        let w = l.pool[i]
+        if line == "" {
+          line = w
+          prev = i
+        } else if clen(line) + 1 + clen(w) <= width {
+          line = line + " " + w
+          prev = i
+        } else {
+          full = true
+        }
+      }
+      out.push(line)
+    }
+  }
+  return out
+}
+
+// ---------------------------------------------------------------- the model
+
+fn blank() -> Model
+  ex blank().run == 0
+  ex blank().start == -1
+{
+  return Model(lang: 0, lesson: 0, lines: [], line: 0, typed: "", keys: 0, errors: 0, start: -1, finish: -1,
+               run: 0, hint: false, best: [])
+}
+
+// a new run of a lesson: fresh random lines, counters at zero
+fn begin(m: Model, lang: Int, lesson: Int, now: Int) -> Model
+  need lang >= 0 and lang <= 1 and now >= 0
+  ex begin(blank(), 1, 2, 7) == blank() with { lang: 1, lesson: 2, lines: make_lines(ru_lessons()[2], 7, lines_per_run), run: 1 }
+  ex begin(blank() with { run: 4, typed: "x", keys: 3, errors: 1, start: 5, finish: 9, line: 2 }, 0, 99, 0).lesson == 7
+  ex begin(blank() with { run: 4, typed: "x", keys: 3, errors: 1, start: 5, finish: 9, line: 2 }, 0, -3, 0) ==
+     blank() with { lines: make_lines(en_lessons()[0], 0, lines_per_run), run: 5 }
+{
+  let ls = lessons(lang)
+  let k = min(max(lesson, 0), len(ls) - 1)
+  return m with { lang: lang, lesson: k, lines: make_lines(ls[k], now, lines_per_run), line: 0, typed: "", keys: 0,
+                  errors: 0, start: -1, finish: -1, run: m.run + 1 }
+}
+
+fn lesson_key(lang: Int, lesson: Int) -> Text
+  ex lesson_key(0, 0) == "en:1"
+  ex lesson_key(1, 7) == "ru:8"
+{
+  if lang == 1 {
+    return "ru:" + show(lesson + 1)
+  }
+  return "en:" + show(lesson + 1)
+}
+
+// how many characters from the start are typed right
+fn right_prefix(target: List[Text], typed: List[Text]) -> Int
+  ex right_prefix(chars("abc"), chars("abx")) == 2
+  ex right_prefix(chars("abc"), chars("abc")) == 3
+  ex right_prefix(chars("ab"), chars("abcd")) == 2
+  ex right_prefix(chars("abc"), []) == 0
+  ex right_prefix(chars("abc"), chars("xbc")) == 0
+{
+  var n = 0
+  while n < len(target) and n < len(typed) and target[n] == typed[n] {
+    n = n + 1
+  }
+  return n
+}
+
+// the wrong characters among those just added (positions old..new-1)
+fn added_errors(target: List[Text], old: List[Text], typed: List[Text]) -> Int
+  ex added_errors(chars("abc"), chars("a"), chars("ab")) == 0
+  ex added_errors(chars("abc"), chars("a"), chars("ax")) == 1
+  ex added_errors(chars("abc"), [], chars("xyc")) == 2
+  ex added_errors(chars("ab"), chars("ab"), chars("abz")) == 1
+  ex added_errors(chars("abc"), chars("ab"), chars("a")) == 0
+{
+  var n = 0
+  for i in len(old)..len(typed) {
+    if i >= len(target) or typed[i] != target[i] {
+      n = n + 1
+    }
+  }
+  return n
+}
+
+// characters typed right so far in this run
+fn done_chars(m: Model) -> Int
+  ex done_chars(blank() with { lines: ["ab", "cde"], line: 1, typed: "cx" }) == 3
+  ex done_chars(blank() with { lines: ["ab", "cde"], line: 0, typed: "a" }) == 1
+  ex done_chars(blank() with { lines: ["ab", "cde"], line: 1, finish: 9 }) == 5
+  ex done_chars(blank() with { lines: ["жж"], line: 0, typed: "ж" }) == 1
+  ex done_chars(blank() with { lines: ["ab", "cde"], line: 1, finish: 0 }) == 5
+{
+  var n = 0
+  if m.finish >= 0 {
+    for l in m.lines {
+      n = n + clen(l)
+    }
+    return n
+  }
+  for i in 0..m.line {
+    n = n + clen(m.lines[i])
+  }
+  return n + right_prefix(chars(m.lines[m.line]), chars(m.typed))
+}
+
+// characters per minute
+fn cpm(n: Int, ms: Int) -> Int
+  ex cpm(100, 30000) == 200
+  ex cpm(7, 0) == 0
+  ex cpm(7, -5) == 0
+  ex cpm(1, 1) == 60000
+{
+  if ms <= 0 {
+    return 0
+  }
+  return n * 60000 / ms
+}
+
+fn accuracy(keys: Int, errors: Int) -> Int
+  need keys >= errors and errors >= 0
+  ex accuracy(0, 0) == 100
+  ex accuracy(50, 2) == 96
+  ex accuracy(3, 3) == 0
+  ex accuracy(3, 1) == 66
+{
+  if keys == 0 {
+    return 100
+  }
+  return (keys - errors) * 100 / keys
+}
+
+fn best_of(bs: List[Best], key: Text) -> Opt[Best]
+  ex best_of([Best(key: "en:1", cpm: 5, acc: 9), Best(key: "ru:1", cpm: 6, acc: 8)], "ru:1") == some(Best(key: "ru:1", cpm: 6, acc: 8))
+  ex best_of([], "ru:1") == none
+{
+  for b in bs {
+    if b.key == key {
+      return some(b)
+    }
+  }
+  return none
+}
+
+// the records with a new result: kept if it is faster than the old one for that lesson
+fn better(bs: List[Best], key: Text, c: Int, acc: Int) -> List[Best]
+  ex better([], "en:1", 120, 95) == [Best(key: "en:1", cpm: 120, acc: 95)]
+  ex better([Best(key: "en:1", cpm: 100, acc: 99)], "en:1", 120, 95) == [Best(key: "en:1", cpm: 120, acc: 95)]
+  ex better([Best(key: "en:1", cpm: 130, acc: 99)], "en:1", 120, 95) == [Best(key: "en:1", cpm: 130, acc: 99)]
+  ex better([Best(key: "en:1", cpm: 120, acc: 99)], "en:1", 120, 95) == [Best(key: "en:1", cpm: 120, acc: 99)]
+  ex better([Best(key: "ru:2", cpm: 1, acc: 2), Best(key: "en:1", cpm: 9, acc: 9)], "en:1", 10, 50) ==
+     [Best(key: "ru:2", cpm: 1, acc: 2), Best(key: "en:1", cpm: 10, acc: 50)]
+  ex better([Best(key: "ru:2", cpm: 1, acc: 2)], "en:1", 10, 50) == [Best(key: "ru:2", cpm: 1, acc: 2), Best(key: "en:1", cpm: 10, acc: 50)]
+{
+  var out = bs
+  for i in 0..len(out) {
+    if out[i].key == key {
+      if c > out[i].cpm {
+        out[i] = Best(key: key, cpm: c, acc: acc)
+      }
+      return out
+    }
+  }
+  out.push(Best(key: key, cpm: c, acc: acc))
+  return out
+}
+
+fn records_text(bs: List[Best]) -> Text
+  ex records_text([Best(key: "en:1", cpm: 120, acc: 95), Best(key: "ru:3", cpm: 80, acc: 100)]) == "en:1 120 95\nru:3 80 100\n"
+  ex records_text([]) == ""
+{
+  var t = ""
+  for b in bs {
+    t = t + b.key + " " + show(b.cpm) + " " + show(b.acc) + "\n"
+  }
+  return t
+}
+
+fn parse_records(t: Text) -> List[Best]
+  ex parse_records("en:1 120 95\nru:3 80 100\n") == [Best(key: "en:1", cpm: 120, acc: 95), Best(key: "ru:3", cpm: 80, acc: 100)]
+  ex parse_records("en:1 120 95\r\nbad line\nru:2 x 5\nru:4 5 x\n\nru:3 80 100") == [Best(key: "en:1", cpm: 120, acc: 95), Best(key: "ru:3", cpm: 80, acc: 100)]
+  ex parse_records("") == []
+{
+  var out: List[Best] = []
+  for ln in split(t, "\n") {
+    let p = split(trim(ln), " ")
+    if len(p) == 3 {
+      match parse_int(p[1]) {
+        none => { }
+        some(c) => {
+          match parse_int(p[2]) {
+            none => { }
+            some(a) => { out.push(Best(key: p[0], cpm: c, acc: a)) }
+          }
+        }
+      }
+    }
+  }
+  return out
+}
+
+// the field changed: count the new characters, move to the next line when this one is typed exactly
+fn on_type(m: Model, value: Text, now: Int) -> Model
+  need m.finish < 0 and m.line < len(m.lines)
+  ex on_type(blank() with { lines: ["ab", "cd"] }, "a", 100) == blank() with { lines: ["ab", "cd"], typed: "a", keys: 1, start: 100 }
+  ex on_type(blank() with { lines: ["ab", "cd"], typed: "a", keys: 1, start: 100 }, "ax", 200) ==
+     blank() with { lines: ["ab", "cd"], typed: "ax", keys: 2, errors: 1, start: 100 }
+  ex on_type(blank() with { lines: ["ab", "cd"], typed: "ax", keys: 2, errors: 1, start: 100 }, "a", 300) ==
+     blank() with { lines: ["ab", "cd"], typed: "a", keys: 2, errors: 1, start: 100 }
+  ex on_type(blank() with { lines: ["ab", "cd"], typed: "a", keys: 2, errors: 1, start: 100 }, "ab", 400) ==
+     blank() with { lines: ["ab", "cd"], line: 1, keys: 3, errors: 1, start: 100 }
+  ex on_type(blank() with { lines: ["ab", "cd"], line: 1, typed: "c", keys: 4, errors: 1, start: 100 }, "cd", 12100) ==
+     blank() with { lines: ["ab", "cd"], line: 1, keys: 5, errors: 1, start: 100, finish: 12100,
+                    best: [Best(key: "en:1", cpm: 20, acc: 80)] }
+  ex on_type(blank() with { lang: 1, lesson: 2, lines: ["я"], best: [Best(key: "ru:3", cpm: 999, acc: 1)] }, "я", 50) ==
+     blank() with { lang: 1, lesson: 2, lines: ["я"], keys: 1, start: 50, finish: 50, best: [Best(key: "ru:3", cpm: 999, acc: 1)] }
+  ex on_type(blank() with { lines: ["abc"], typed: "a", keys: 1, start: 0 }, "ab", 500).start == 0
+{
+  let target = m.lines[m.line]
+  let tc = chars(target)
+  let old = chars(m.typed)
+  let nw = chars(value)
+  var keys = m.keys
+  var errors = m.errors
+  if len(nw) > len(old) {
+    keys = keys + len(nw) - len(old)
+    errors = errors + added_errors(tc, old, nw)
+  }
+  var start = m.start
+  if start < 0 {
+    start = now
+  }
+  let next = m with { typed: value, keys: keys, errors: errors, start: start }
+  if value != target {
+    return next
+  }
+  if m.line + 1 < len(m.lines) {
+    return next with { line: m.line + 1, typed: "" }
+  }
+  let fin = next with { typed: "", finish: now }
+  return fin with { best: better(fin.best, lesson_key(m.lang, m.lesson), cpm(done_chars(fin), now - start),
+                                 accuracy(keys, errors)) }
+}
+
+fn field_key(m: Model) -> Int
+  ex field_key(blank() with { run: 3, line: 2 }) == 3002
+{
+  return m.run * 1000 + m.line
+}
+
+fn update(m: Model, ev: UiEv, now: Int) -> Model
+  need now >= 0
+  ex update(blank(), UiTick, 5) == blank()
+  ex update(blank(), UiOpened, 5) == blank()
+  ex update(blank(), UiClosed, 5) == blank()
+  ex update(blank(), UiClick(id: "lang", arg: 1), 5) == begin(blank(), 1, 0, 5)
+  ex update(blank() with { lesson: 3 }, UiClick(id: "lang", arg: 1), 5) == begin(blank(), 1, 3, 5)
+  ex update(blank(), UiClick(id: "lang", arg: 0), 5) == blank()
+  ex update(blank(), UiClick(id: "lang", arg: 7), 5) == blank()
+  ex update(blank(), UiClick(id: "lang", arg: 2), 5) == blank()
+  ex update(blank() with { lang: 1, lesson: 4 }, UiClick(id: "lang", arg: 0), 5) == begin(blank(), 0, 4, 5)
+  ex update(blank() with { lang: 1 }, UiClick(id: "lang", arg: -1), 5) == blank() with { lang: 1 }
+  ex update(blank() with { lines: ["ab"], run: 1, finish: 0 }, UiChange(id: "type", arg: 1000, value: "a"), 5) ==
+     blank() with { lines: ["ab"], run: 1, finish: 0 }
+  ex update(blank() with { lesson: 2 }, UiClick(id: "again", arg: 0), 5) == begin(blank(), 0, 2, 5)
+  ex update(blank() with { lesson: 2 }, UiClick(id: "next", arg: 0), 5) == begin(blank(), 0, 3, 5)
+  ex update(blank() with { lesson: 7 }, UiClick(id: "next", arg: 0), 5) == begin(blank(), 0, 0, 5)
+  ex update(blank(), UiClick(id: "what", arg: 0), 5) == blank()
+  ex update(blank(), UiChange(id: "lesson", arg: 0, value: "6. Цифры"), 5) == begin(blank(), 0, 5, 5)
+  ex update(blank(), UiChange(id: "lesson", arg: 0, value: "no such"), 5) == blank()
+  ex update(blank(), UiChange(id: "hint", arg: 0, value: "true"), 5) == blank() with { hint: true }
+  ex update(blank() with { hint: true }, UiChange(id: "hint", arg: 0, value: "false"), 5) == blank()
+  ex update(blank() with { lines: ["ab"], run: 1 }, UiChange(id: "type", arg: 1000, value: "a"), 5) ==
+     blank() with { lines: ["ab"], run: 1, typed: "a", keys: 1, start: 5 }
+  ex update(blank() with { lines: ["ab"], run: 1 }, UiChange(id: "type", arg: 999, value: "a"), 5) == blank() with { lines: ["ab"], run: 1 }
+  ex update(blank() with { lines: ["ab"], run: 1, finish: 3 }, UiChange(id: "type", arg: 1000, value: "a"), 5) ==
+     blank() with { lines: ["ab"], run: 1, finish: 3 }
+  ex update(blank(), UiChange(id: "other", arg: 0, value: "a"), 5) == blank()
+{
+  match ev {
+    UiTick => { return m }
+    UiOpened => { return m }
+    UiClosed => { return m }
+    UiClick(id, arg) => {
+      match id {
+        "lang" => {
+          if arg == m.lang or arg < 0 or arg > 1 {
+            return m
+          }
+          return begin(m, arg, m.lesson, now)
+        }
+        "again" => { return begin(m, m.lang, m.lesson, now) }
+        "next" => { return begin(m, m.lang, (m.lesson + 1) % len(lessons(m.lang)), now) }
+        else => { return m }
+      }
+    }
+    UiChange(id, arg, value) => {
+      match id {
+        "lesson" => {
+          match index_of(titles(lessons(m.lang)), value) {
+            some(k) => { return begin(m, m.lang, k, now) }
+            none => { return m }
+          }
+        }
+        "hint" => { return m with { hint: value == "true" } }
+        "type" => {
+          if m.finish >= 0 or arg != field_key(m) {
+            return m
+          }
+          return on_type(m, value, now)
+        }
+        else => { return m }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------- the keyboard
+
+fn key_rows(lang: Int, shift: Bool) -> List[Text]
+  ex key_rows(0, false)[2] == "asdfghjkl;'"
+  ex key_rows(0, true)[3] == "ZXCVBNM<>?"
+  ex key_rows(1, false)[1] == "йцукенгшщзхъ\\"
+  ex key_rows(1, true)[0] == "Ё!\"№;%:?*()_+"
+{
+  if lang == 1 {
+    if shift {
+      return ["Ё!\"№;%:?*()_+", "ЙЦУКЕНГШЩЗХЪ/", "ФЫВАПРОЛДЖЭ", "ЯЧСМИТЬБЮ,"]
+    }
+    return ["ё1234567890-=", "йцукенгшщзхъ\\", "фывапролджэ", "ячсмитьбю."]
+  }
+  if shift {
+    return ["~!@#$%^&*()_+", "QWERTYUIOP{}|", "ASDFGHJKL:\"", "ZXCVBNM<>?"]
+  }
+  return ["`1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'", "zxcvbnm,./"]
+}
+
+// where a character is on the keyboard; row 4 is the space bar
+fn key_at(lang: Int, ch: Text) -> Opt[KeyPos]
+  ex key_at(0, "f") == some(KeyPos(row: 2, col: 3, shift: false))
+  ex key_at(0, "F") == some(KeyPos(row: 2, col: 3, shift: true))
+  ex key_at(1, "а") == some(KeyPos(row: 2, col: 3, shift: false))
+  ex key_at(1, ",") == some(KeyPos(row: 3, col: 9, shift: true))
+  ex key_at(0, ",") == some(KeyPos(row: 3, col: 7, shift: false))
+  ex key_at(0, "`") == some(KeyPos(row: 0, col: 0, shift: false))
+  ex key_at(1, " ") == some(KeyPos(row: 4, col: 0, shift: false))
+  ex key_at(0, "ж") == none
+{
+  if ch == " " {
+    return some(KeyPos(row: 4, col: 0, shift: false))
+  }
+  for sh in [false, true] {
+    let rows = key_rows(lang, sh)
+    for r in 0..len(rows) {
+      let cs = chars(rows[r])
+      for c in 0..len(cs) {
+        if cs[c] == ch {
+          return some(KeyPos(row: r, col: c, shift: sh))
+        }
+      }
+    }
+  }
+  return none
+}
+
+// 0..3 left pinky..index, 4..7 right index..pinky, 8 thumb
+fn finger(row: Int, col: Int) -> Int
+  need row >= 0 and row <= 4 and col >= 0
+  ex finger(2, 0) == 0
+  ex finger(2, 1) == 1
+  ex finger(2, 2) == 2
+  ex finger(2, 3) == 3
+  ex finger(2, 4) == 3
+  ex finger(2, 5) == 4
+  ex finger(2, 6) == 4
+  ex finger(2, 7) == 5
+  ex finger(2, 8) == 6
+  ex finger(2, 9) == 7
+  ex finger(1, 12) == 7
+  ex finger(0, 0) == 0
+  ex finger(0, 1) == 0
+  ex finger(0, 2) == 1
+  ex finger(0, 5) == 3
+  ex finger(0, 6) == 4
+  ex finger(0, 10) == 7
+  ex finger(4, 0) == 8
+{
+  if row == 4 {
+    return 8
+  }
+  var c = col
+  if row == 0 {
+    c = max(col - 1, 0)
+  }
+  match c {
+    0 => { return 0 }
+    1 => { return 1 }
+    2 => { return 2 }
+    3, 4 => { return 3 }
+    5, 6 => { return 4 }
+    7 => { return 5 }
+    8 => { return 6 }
+    else => { return 7 }
+  }
+}
+
+fn finger_name(f: Int) -> Text
+  ex finger_name(0) == "левый мизинец"
+  ex finger_name(3) == "левый указательный"
+  ex finger_name(4) == "правый указательный"
+  ex finger_name(7) == "правый мизинец"
+  ex finger_name(8) == "большой палец"
+  ex finger_name(1) == "левый безымянный"
+  ex finger_name(2) == "левый средний"
+  ex finger_name(5) == "правый средний"
+  ex finger_name(6) == "правый безымянный"
+{
+  match f {
+    0 => { return "левый мизинец" }
+    1 => { return "левый безымянный" }
+    2 => { return "левый средний" }
+    3 => { return "левый указательный" }
+    4 => { return "правый указательный" }
+    5 => { return "правый средний" }
+    6 => { return "правый безымянный" }
+    7 => { return "правый мизинец" }
+    else => { return "большой палец" }
+  }
+}
+
+fn finger_color(f: Int) -> Text
+  ex finger_color(0) == "rgba(229,72,77,.18)"
+  ex finger_color(7) == "rgba(229,72,77,.18)"
+  ex finger_color(1) == "rgba(245,166,35,.2)"
+  ex finger_color(6) == "rgba(245,166,35,.2)"
+  ex finger_color(2) == "rgba(70,167,88,.2)"
+  ex finger_color(5) == "rgba(70,167,88,.2)"
+  ex finger_color(3) == "rgba(79,140,255,.2)"
+  ex finger_color(4) == "rgba(79,140,255,.2)"
+  ex finger_color(8) == "rgba(140,140,140,.18)"
+{
+  match f {
+    0, 7 => { return "rgba(229,72,77,.18)" }
+    1, 6 => { return "rgba(245,166,35,.2)" }
+    2, 5 => { return "rgba(70,167,88,.2)" }
+    3, 4 => { return "rgba(79,140,255,.2)" }
+    else => { return "rgba(140,140,140,.18)" }
+  }
+}
+
+// the Shift for a key is pressed by the other hand
+fn shift_finger(f: Int) -> Int
+  ex shift_finger(0) == 7
+  ex shift_finger(3) == 7
+  ex shift_finger(4) == 0
+  ex shift_finger(7) == 0
+{
+  if f < 4 {
+    return 7
+  }
+  return 0
+}
+
+fn cap(label: Text, f: Int, lit: Bool, w: Text) -> Text
+  ex cap("a", 0, false, "2.4") == "<span style=\"display:inline-block;box-sizing:border-box;min-width:2.4em;height:2.4em;line-height:2.3em;margin:2px;padding:0 4px;text-align:center;border:1px solid #8887;border-radius:6px;background:rgba(229,72,77,.18)\">a</span>"
+  ex cap("<", 3, true, "2.4") == "<span style=\"display:inline-block;box-sizing:border-box;min-width:2.4em;height:2.4em;line-height:2.3em;margin:2px;padding:0 4px;text-align:center;border:1px solid #8887;border-radius:6px;background:#4f8cff;color:#fff;font-weight:700\">&lt;</span>"
+{
+  var bg = finger_color(f)
+  if lit {
+    bg = "#4f8cff;color:#fff;font-weight:700"
+  }
+  return "<span style=\"display:inline-block;box-sizing:border-box;min-width:" + w + "em;height:2.4em;line-height:2.3em;" +
+         "margin:2px;padding:0 4px;text-align:center;border:1px solid #8887;border-radius:6px;background:" + bg + "\">" +
+         html_esc(label) + "</span>"
+}
+
+fn count(t: Text, sub: Text) -> Int
+  need sub != ""
+  ex count("abab", "ab") == 2
+  ex count("aaa", "aa") == 1
+  ex count("", "a") == 0
+  ex count("xa", "a") == 1
+{
+  var n = 0
+  var rest = t
+  var going = true
+  while going {
+    match find(rest, sub) {
+      some(i) => {
+        n = n + 1
+        rest = slice(rest, i + len(sub), len(rest))
+      }
+      none => { going = false }
+    }
+  }
+  return n
+}
+
+fn at_key(at: Opt[KeyPos], row: Int, col: Int) -> Bool
+  ex at_key(some(KeyPos(row: 2, col: 3, shift: true)), 2, 3) == true
+  ex at_key(some(KeyPos(row: 2, col: 3, shift: false)), 2, 4) == false
+  ex at_key(some(KeyPos(row: 2, col: 3, shift: false)), 1, 3) == false
+  ex at_key(none, 2, 3) == false
+{
+  match at {
+    some(p) => { return p.row == row and p.col == col }
+    none => { return false }
+  }
+}
+
+// which Shift to light: 0 none, 1 left, 2 right
+fn shift_side(at: Opt[KeyPos]) -> Int
+  ex shift_side(some(KeyPos(row: 2, col: 3, shift: true))) == 2
+  ex shift_side(some(KeyPos(row: 2, col: 6, shift: true))) == 1
+  ex shift_side(some(KeyPos(row: 2, col: 6, shift: false))) == 0
+  ex shift_side(none) == 0
+{
+  match at {
+    some(p) => {
+      if not p.shift {
+        return 0
+      }
+      if shift_finger(finger(p.row, p.col)) == 7 {
+        return 2
+      }
+      return 1
+    }
+    none => { return 0 }
+  }
+}
+
+// the keyboard drawn with finger colours; `want` is the next character to type, `fix` = Backspace first
+fn keyboard_html(lang: Int, want: Text, fix: Bool) -> Text
+  ex contains(keyboard_html(0, "F", false), cap("Shift", 7, true, "6.2"))
+  ex contains(keyboard_html(0, "F", false), cap("f", 3, true, "2.4"))
+  ex contains(keyboard_html(0, "f", false), cap("Shift", 7, false, "6.2"))
+  ex contains(keyboard_html(1, "Ж", false), cap("Shift", 0, true, "5.4"))
+  ex contains(keyboard_html(1, " ", false), cap(" ", 8, true, "18"))
+  ex contains(keyboard_html(1, "ж", true), cap("⌫", 7, true, "4.2"))
+  ex contains(keyboard_html(1, "ж", true), cap("ж", 7, false, "2.4"))
+  ex contains(keyboard_html(1, "ж", false), cap("⌫", 7, false, "4.2"))
+  ex contains(keyboard_html(0, "", false), cap("Caps", 0, false, "4.4"))
+  ex contains(keyboard_html(0, "", false), cap("Tab", 0, false, "3.6"))
+  ex contains(keyboard_html(0, "", false), cap("Enter", 7, false, "4.6"))
+  ex contains(keyboard_html(0, "", false), cap("Shift", 0, false, "5.4"))
+  ex contains(keyboard_html(0, "", false), cap(" ", 8, false, "18"))
+  ex contains(keyboard_html(0, "", false), cap("`", 0, false, "2.4") + cap("1", 0, false, "2.4") + cap("2", 1, false, "2.4"))
+  ex contains(keyboard_html(1, "", false), cap("Tab", 0, false, "3.6") + cap("й", 0, false, "2.4"))
+  ex contains(keyboard_html(1, "", false), cap("э", 7, false, "2.4") + cap("Enter", 7, false, "4.6"))
+  ex contains(keyboard_html(1, "", false), cap("Shift", 0, false, "5.4") + cap("я", 0, false, "2.4"))
+  ex contains(keyboard_html(1, "", false), cap(".", 7, false, "2.4") + cap("Shift", 7, false, "6.2"))
+  ex contains(keyboard_html(1, "", false), cap("=", 7, false, "2.4") + cap("⌫", 7, false, "4.2"))
+  ex count(keyboard_html(0, "f", false), "#4f8cff") == 1
+  ex count(keyboard_html(0, "F", false), "#4f8cff") == 2
+  ex count(keyboard_html(0, "f", true), "#4f8cff") == 1
+  ex count(keyboard_html(0, "", false), "#4f8cff") == 0 and count(keyboard_html(0, "", false), "<span") == 54
+  ex count(keyboard_html(0, "", false), "white-space:nowrap") == 5
+  ex count(keyboard_html(0, "", false), "</div>") == 6
+  ex count(keyboard_html(1, "", false), "<span") == 13 + 1 + 1 + 13 + 1 + 11 + 1 + 1 + 10 + 1 + 1
+  ex starts_with(keyboard_html(1, "", false), "<div style=\"font:15px Consolas,'DejaVu Sans Mono',ui-monospace,monospace;overflow-x:auto;padding:4px 0\"><div style=\"white-space:nowrap\">" + cap("ё", 0, false, "2.4"))
+  ex ends_with(keyboard_html(1, "", false), "<div style=\"white-space:nowrap;padding-left:10em\">" + cap(" ", 8, false, "18") + "</div></div>")
+{
+  var at: Opt[KeyPos] = none
+  if not fix and want != "" {
+    at = key_at(lang, want)
+  }
+  let side = shift_side(at)
+  let rows = key_rows(lang, false)
+  var h = "<div style=\"font:15px Consolas,'DejaVu Sans Mono',ui-monospace,monospace;overflow-x:auto;padding:4px 0\">"
+  for r in 0..4 {
+    h = h + "<div style=\"white-space:nowrap\">"
+    if r == 1 {
+      h = h + cap("Tab", 0, false, "3.6")
+    } else if r == 2 {
+      h = h + cap("Caps", 0, false, "4.4")
+    } else if r == 3 {
+      h = h + cap("Shift", 0, side == 1, "5.4")
+    }
+    let cs = chars(rows[r])
+    for c in 0..len(cs) {
+      h = h + cap(cs[c], finger(r, c), at_key(at, r, c), "2.4")
+    }
+    if r == 0 {
+      h = h + cap("⌫", 7, fix, "4.2")
+    } else if r == 2 {
+      h = h + cap("Enter", 7, false, "4.6")
+    } else if r == 3 {
+      h = h + cap("Shift", 7, side == 2, "6.2")
+    }
+    h = h + "</div>"
+  }
+  return h + "<div style=\"white-space:nowrap;padding-left:10em\">" + cap(" ", 8, at_key(at, 4, 0), "18") + "</div></div>"
+}
+
+// what to press next: the next character, or "" when the line has a mistake to erase first (then fix = true)
+fn want_next(m: Model) -> Text
+  ex want_next(blank() with { lines: ["abc"], typed: "ab" }) == "c"
+  ex want_next(blank() with { lines: ["abc"], typed: "" }) == "a"
+  ex want_next(blank() with { lines: ["abc"], typed: "ax" }) == ""
+  ex want_next(blank() with { lines: ["abc"], typed: "abc" }) == ""
+  ex want_next(blank() with { lines: ["abc"], finish: 5 }) == ""
+  ex want_next(blank() with { lines: ["abc"], finish: 0 }) == ""
+  ex want_next(blank() with { lines: ["ab", "жк"], line: 1, typed: "ж" }) == "к"
+{
+  if m.finish >= 0 {
+    return ""
+  }
+  let tc = chars(m.lines[m.line])
+  let yc = chars(m.typed)
+  if right_prefix(tc, yc) < len(yc) or len(yc) >= len(tc) {
+    return ""
+  }
+  return tc[len(yc)]
+}
+
+fn has_mistake(m: Model) -> Bool
+  ex has_mistake(blank() with { lines: ["abc"], typed: "ax" }) == true
+  ex has_mistake(blank() with { lines: ["abc"], typed: "ab" }) == false
+  ex has_mistake(blank() with { lines: ["abc"], typed: "abcd" }) == true
+  ex has_mistake(blank() with { lines: ["abc"], typed: "ax", finish: 3 }) == false
+  ex has_mistake(blank() with { lines: ["abc"], typed: "ax", finish: 0 }) == false
+{
+  if m.finish >= 0 {
+    return false
+  }
+  let yc = chars(m.typed)
+  return right_prefix(chars(m.lines[m.line]), yc) < len(yc)
+}
+
+fn hint_text(lang: Int, want: Text, fix: Bool) -> Text
+  ex hint_text(0, "f", true) == "Есть ошибка: сотрите её клавишей Backspace (правый мизинец)."
+  ex hint_text(0, "f", false) == "Следующая: «f» — левый указательный."
+  ex hint_text(0, "F", false) == "Следующая: «F» — правый Shift (правый мизинец) + клавиша (левый указательный)."
+  ex hint_text(1, "Ж", false) == "Следующая: «Ж» — левый Shift (левый мизинец) + клавиша (правый мизинец)."
+  ex hint_text(1, " ", false) == "Следующая: пробел — большой палец."
+  ex hint_text(1, "€", false) == "Следующая: «€»."
+  ex hint_text(1, "", false) == ""
+{
+  if fix {
+    return "Есть ошибка: сотрите её клавишей Backspace (правый мизинец)."
+  }
+  if want == "" {
+    return ""
+  }
+  if want == " " {
+    return "Следующая: пробел — большой палец."
+  }
+  match key_at(lang, want) {
+    none => { return "Следующая: «" + want + "»." }
+    some(p) => {
+      let f = finger(p.row, p.col)
+      if not p.shift {
+        return "Следующая: «" + want + "» — " + finger_name(f) + "."
+      }
+      var side = "правый"
+      if shift_finger(f) == 0 {
+        side = "левый"
+      }
+      return "Следующая: «" + want + "» — " + side + " Shift (" + finger_name(shift_finger(f)) + ") + клавиша (" +
+             finger_name(f) + ")."
+    }
+  }
+}
+
+// ---------------------------------------------------------------- the screen
+
+fn is_latin(c: Text) -> Bool
+  ex is_latin("a") == true
+  ex is_latin("z") == true
+  ex is_latin("A") == true
+  ex is_latin("Z") == true
+  ex is_latin("@") == false
+  ex is_latin("[") == false
+  ex is_latin("`") == false
+  ex is_latin("{") == false
+  ex is_latin("ж") == false
+  ex is_latin("") == false
+{
+  if len(c) != 1 {
+    return false
+  }
+  let b = byte(c, 0)
+  return (b >= 'A' and b <= 'Z') or (b >= 'a' and b <= 'z')
+}
+
+fn is_cyrillic(c: Text) -> Bool
+  ex is_cyrillic("ж") == true
+  ex is_cyrillic("Ё") == true
+  ex is_cyrillic("ё") == true
+  ex is_cyrillic("a") == false
+  ex is_cyrillic("€") == false
+  ex is_cyrillic("") == false
+{
+  if len(c) != 2 {
+    return false
+  }
+  let b = byte(c, 0)
+  return b == 208 or b == 209
+}
+
+// a wrong letter of the other alphabet means the system layout is the other one
+fn layout_note(lang: Int, typed: Text) -> Text
+  ex layout_note(1, "фыd") == "Похоже, включена английская раскладка — переключите на русскую (обычно Alt+Shift или Win+Пробел)."
+  ex layout_note(0, "asж") == "Похоже, включена русская раскладка — переключите на английскую (обычно Alt+Shift или Win+Пробел)."
+  ex layout_note(1, "dф") == ""
+  ex layout_note(0, "жa") == ""
+  ex layout_note(1, "") == ""
+  ex layout_note(0, "1") == ""
+{
+  let cs = chars(typed)
+  if len(cs) == 0 {
+    return ""
+  }
+  let c = cs[len(cs) - 1]
+  if lang == 1 and is_latin(c) {
+    return "Похоже, включена английская раскладка — переключите на русскую (обычно Alt+Shift или Win+Пробел)."
+  }
+  if lang == 0 and is_cyrillic(c) {
+    return "Похоже, включена русская раскладка — переключите на английскую (обычно Alt+Shift или Win+Пробел)."
+  }
+  return ""
+}
+
+fn time_text(ms: Int) -> Text
+  need ms >= 0
+  ex time_text(0) == "0:00"
+  ex time_text(42999) == "0:42"
+  ex time_text(61000) == "1:01"
+  ex time_text(600000) == "10:00"
+  ex time_text(59000) == "0:59"
+  ex time_text(10000) == "0:10"
+{
+  let s = ms / 1000
+  var ss = show(s % 60)
+  if s % 60 < 10 {
+    ss = "0" + ss
+  }
+  return show(s / 60) + ":" + ss
+}
+
+// the line being typed: green = right, red = wrong (the letter that should be there), blue = the cursor
+fn line_html(target: Text, typed: Text) -> Text
+  ex line_html("ab", "") == "<span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\">a</span>b"
+  ex line_html("ab", "a") == "<span style=\"color:#1f9d55\">a</span><span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\">b</span>"
+  ex line_html("a<", "x") == "<span style=\"background:#e5484d;color:#fff;border-radius:3px\">a</span><span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\">&lt;</span>"
+  ex line_html("a", "ax") == "<span style=\"color:#1f9d55\">a</span><span style=\"background:#e5484d;color:#fff;border-radius:3px\">x</span>"
+  ex line_html("ab", "ax") == "<span style=\"color:#1f9d55\">a</span><span style=\"background:#e5484d;color:#fff;border-radius:3px\">b</span><span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\"> </span>"
+  ex line_html("ж", "ж") == "<span style=\"color:#1f9d55\">ж</span><span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\"> </span>"
+{
+  let tc = chars(target)
+  let yc = chars(typed)
+  let cur = "<span style=\"background:rgba(79,140,255,.35);border-bottom:3px solid #4f8cff\">"
+  let bad = "<span style=\"background:#e5484d;color:#fff;border-radius:3px\">"
+  var h = ""
+  for i in 0..len(tc) {
+    let c = html_esc(tc[i])
+    if i < len(yc) {
+      if yc[i] == tc[i] {
+        h = h + "<span style=\"color:#1f9d55\">" + c + "</span>"
+      } else {
+        h = h + bad + c + "</span>"
+      }
+    } else if i == len(yc) {
+      h = h + cur + c + "</span>"
+    } else {
+      h = h + c
+    }
+  }
+  if len(yc) > len(tc) {
+    return h + bad + html_esc(join(slice(yc, len(tc), len(yc)), "")) + "</span>"
+  }
+  if len(yc) == len(tc) {
+    return h + cur + " </span>"
+  }
+  return h
+}
+
+fn text_html(m: Model) -> Text
+  ex text_html(blank() with { lines: ["ab", "c<"], line: 1, typed: "" }) ==
+     "<div style=\"font:26px/1.7 Consolas,'DejaVu Sans Mono','Liberation Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto;padding:10px 16px;border:1px solid #8885;border-radius:10px\">" +
+     "<div style=\"opacity:.4\">ab</div><div>" + line_html("c<", "") + "</div></div>"
+  ex text_html(blank() with { lines: ["ab", "c<"], line: 0, typed: "a" }) ==
+     "<div style=\"font:26px/1.7 Consolas,'DejaVu Sans Mono','Liberation Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto;padding:10px 16px;border:1px solid #8885;border-radius:10px\">" +
+     "<div>" + line_html("ab", "a") + "</div><div style=\"opacity:.6\">c&lt;</div></div>"
+  ex text_html(blank() with { lines: ["ab", "c"], line: 1, finish: 9 }) ==
+     "<div style=\"font:26px/1.7 Consolas,'DejaVu Sans Mono','Liberation Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto;padding:10px 16px;border:1px solid #8885;border-radius:10px\">" +
+     "<div style=\"opacity:.4\">ab</div><div style=\"opacity:.4\">c</div></div>"
+  ex text_html(blank() with { lines: ["a"], finish: 0 }) ==
+     "<div style=\"font:26px/1.7 Consolas,'DejaVu Sans Mono','Liberation Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto;padding:10px 16px;border:1px solid #8885;border-radius:10px\">" +
+     "<div style=\"opacity:.4\">a</div></div>"
+{
+  var h = "<div style=\"font:26px/1.7 Consolas,'DejaVu Sans Mono','Liberation Mono',ui-monospace,monospace;white-space:pre;overflow-x:auto;" +
+          "padding:10px 16px;border:1px solid #8885;border-radius:10px\">"
+  for i in 0..len(m.lines) {
+    if i < m.line or m.finish >= 0 {
+      h = h + "<div style=\"opacity:.4\">" + html_esc(m.lines[i]) + "</div>"
+    } else if i == m.line {
+      h = h + "<div>" + line_html(m.lines[i], m.typed) + "</div>"
+    } else {
+      h = h + "<div style=\"opacity:.6\">" + html_esc(m.lines[i]) + "</div>"
+    }
+  }
+  return h + "</div>"
+}
+
+// speed etc.; while typing, time is counted in whole seconds so the screen changes at most once a second
+fn stats_text(m: Model, now: Int) -> Text
+  ex stats_text(blank() with { lines: ["ab"] }, 5000) == "Время пойдёт с первой нажатой клавиши."
+  ex stats_text(blank() with { lines: ["abcdefghij"], typed: "abcdx", keys: 6, errors: 1, start: 1000 }, 3999) ==
+     "Скорость: 120 зн/мин (24 сл/мин) · Точность: 83% · Ошибок: 1 · Время: 0:02"
+  ex stats_text(blank() with { lines: ["abcdefghij"], keys: 10, start: 1000, finish: 6000, line: 0 }, 99999) ==
+     "Скорость: 120 зн/мин (24 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:05"
+  ex stats_text(blank() with { lines: ["ab"], typed: "a", keys: 1, start: 9000 }, 1000) ==
+     "Скорость: 0 зн/мин (0 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:00"
+  ex stats_text(blank() with { lines: ["abcdefghij"], typed: "abc", keys: 3, start: 0 }, 3002) ==
+     "Скорость: 60 зн/мин (12 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:03"
+  ex stats_text(blank() with { lines: ["ab"], keys: 2, start: 0, finish: 0 }, 5000) ==
+     "Скорость: 0 зн/мин (0 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:00"
+{
+  if m.start < 0 {
+    return "Время пойдёт с первой нажатой клавиши."
+  }
+  var ms = m.finish - m.start
+  if m.finish < 0 {
+    ms = max(now - m.start, 0) / 1000 * 1000
+  }
+  let c = cpm(done_chars(m), ms)
+  return "Скорость: " + show(c) + " зн/мин (" + show(c / 5) + " сл/мин) · Точность: " + show(accuracy(m.keys, m.errors)) +
+         "% · Ошибок: " + show(m.errors) + " · Время: " + time_text(ms)
+}
+
+fn best_line(m: Model) -> Text
+  ex best_line(blank()) == "Рекорда в этом уроке пока нет."
+  ex best_line(blank() with { lang: 1, lesson: 1, best: [Best(key: "ru:2", cpm: 150, acc: 97)] }) ==
+     "Рекорд урока: 150 зн/мин (30 сл/мин), точность 97%."
+{
+  match best_of(m.best, lesson_key(m.lang, m.lesson)) {
+    none => { return "Рекорда в этом уроке пока нет." }
+    some(b) => { return "Рекорд урока: " + show(b.cpm) + " зн/мин (" + show(b.cpm / 5) + " сл/мин), точность " + show(b.acc) + "%." }
+  }
+}
+
+fn home_text(lang: Int) -> Text
+  ex home_text(0) == "Исходная позиция: левая рука на A S D F, правая на J K L ;  — на F и J есть бугорки, найдите их не глядя. Большие пальцы — на пробеле."
+  ex home_text(1) == "Исходная позиция: левая рука на Ф Ы В А, правая на О Л Д Ж  — на А и О есть бугорки, найдите их не глядя. Большие пальцы — на пробеле."
+{
+  if lang == 1 {
+    return "Исходная позиция: левая рука на Ф Ы В А, правая на О Л Д Ж  — на А и О есть бугорки, найдите их не глядя. Большие пальцы — на пробеле."
+  }
+  return "Исходная позиция: левая рука на A S D F, правая на J K L ;  — на F и J есть бугорки, найдите их не глядя. Большие пальцы — на пробеле."
+}
+
+fn lang_label(lang: Int, me: Int, name: Text) -> Text
+  ex lang_label(0, 0, "English") == "● English"
+  ex lang_label(1, 0, "English") == "English"
+{
+  if lang == me {
+    return "● " + name
+  }
+  return name
+}
+
+fn view(m: Model, now: Int) -> UiNode
+  ex view(blank() with { lines: ["ab"], run: 1 }, 0) == UiCol(kids: [
+       UiHeading(text: "Клавиатурный тренажёр"),
+       UiRow(kids: [UiButton(id: "lang", arg: 0, label: "● English"), UiButton(id: "lang", arg: 1, label: "Русский"),
+                    UiSelect(id: "lesson", arg: 0, value: en_lessons()[0].title, options: titles(en_lessons())),
+                    UiButton(id: "again", arg: 0, label: "Заново"),
+                    UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: false)]),
+       UiText(text: home_text(0)),
+       UiHtml(html: text_html(blank() with { lines: ["ab"] })),
+       UiInput(id: "type", arg: 1000, value: "", hint: "печатайте здесь"),
+       UiText(text: "Время пойдёт с первой нажатой клавиши."),
+       UiText(text: "Рекорда в этом уроке пока нет.")])
+  ex view(blank() with { lang: 1, lines: ["аб"], run: 2, typed: "аd", keys: 2, errors: 1, start: 0, hint: true }, 0) == UiCol(kids: [
+       UiHeading(text: "Клавиатурный тренажёр"),
+       UiRow(kids: [UiButton(id: "lang", arg: 0, label: "English"), UiButton(id: "lang", arg: 1, label: "● Русский"),
+                    UiSelect(id: "lesson", arg: 0, value: ru_lessons()[0].title, options: titles(ru_lessons())),
+                    UiButton(id: "again", arg: 0, label: "Заново"),
+                    UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: true)]),
+       UiText(text: home_text(1)),
+       UiHtml(html: text_html(blank() with { lines: ["аб"], typed: "аd" })),
+       UiInput(id: "type", arg: 2000, value: "аd", hint: "печатайте здесь"),
+       UiText(text: "Скорость: 0 зн/мин (0 сл/мин) · Точность: 50% · Ошибок: 1 · Время: 0:00"),
+       UiText(text: layout_note(1, "аd")),
+       UiHtml(html: keyboard_html(1, "", true)),
+       UiText(text: hint_text(1, "", true)),
+       UiText(text: "Рекорда в этом уроке пока нет.")])
+  ex view(blank() with { lang: 1, lines: ["аб"], run: 2, typed: "ав", keys: 2, errors: 1, start: 0 }, 0) == UiCol(kids: [
+       UiHeading(text: "Клавиатурный тренажёр"),
+       UiRow(kids: [UiButton(id: "lang", arg: 0, label: "English"), UiButton(id: "lang", arg: 1, label: "● Русский"),
+                    UiSelect(id: "lesson", arg: 0, value: ru_lessons()[0].title, options: titles(ru_lessons())),
+                    UiButton(id: "again", arg: 0, label: "Заново"),
+                    UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: false)]),
+       UiText(text: home_text(1)),
+       UiHtml(html: text_html(blank() with { lines: ["аб"], typed: "ав" })),
+       UiInput(id: "type", arg: 2000, value: "ав", hint: "печатайте здесь"),
+       UiText(text: "Скорость: 0 зн/мин (0 сл/мин) · Точность: 50% · Ошибок: 1 · Время: 0:00"),
+       UiText(text: "Рекорда в этом уроке пока нет.")])
+  ex view(blank() with { lines: ["ab"], run: 1, start: 0, finish: 0 }, 9) == UiCol(kids: [
+       UiHeading(text: "Клавиатурный тренажёр"),
+       UiRow(kids: [UiButton(id: "lang", arg: 0, label: "● English"), UiButton(id: "lang", arg: 1, label: "Русский"),
+                    UiSelect(id: "lesson", arg: 0, value: en_lessons()[0].title, options: titles(en_lessons())),
+                    UiButton(id: "again", arg: 0, label: "Заново"),
+                    UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: false)]),
+       UiText(text: home_text(0)),
+       UiHtml(html: text_html(blank() with { lines: ["ab"], finish: 0 })),
+       UiBox(title: "Урок пройден", kids: [
+         UiText(text: "Скорость: 0 зн/мин (0 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:00"),
+         UiText(text: "Рекорда в этом уроке пока нет."),
+         UiRow(kids: [UiButton(id: "again", arg: 0, label: "Ещё раз"), UiButton(id: "next", arg: 0, label: "Следующий урок →")])])])
+  ex view(blank() with { lines: ["ab"], run: 1, keys: 2, start: 0, finish: 3000, best: [Best(key: "en:1", cpm: 40, acc: 100)] }, 9) == UiCol(kids: [
+       UiHeading(text: "Клавиатурный тренажёр"),
+       UiRow(kids: [UiButton(id: "lang", arg: 0, label: "● English"), UiButton(id: "lang", arg: 1, label: "Русский"),
+                    UiSelect(id: "lesson", arg: 0, value: en_lessons()[0].title, options: titles(en_lessons())),
+                    UiButton(id: "again", arg: 0, label: "Заново"),
+                    UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: false)]),
+       UiText(text: home_text(0)),
+       UiHtml(html: text_html(blank() with { lines: ["ab"], finish: 3000 })),
+       UiBox(title: "Урок пройден", kids: [
+         UiText(text: "Скорость: 40 зн/мин (8 сл/мин) · Точность: 100% · Ошибок: 0 · Время: 0:03"),
+         UiText(text: "Рекорд урока: 40 зн/мин (8 сл/мин), точность 100%."),
+         UiRow(kids: [UiButton(id: "again", arg: 0, label: "Ещё раз"), UiButton(id: "next", arg: 0, label: "Следующий урок →")])])])
+{
+  let ls = lessons(m.lang)
+  var kids: List[UiNode] = [
+    UiHeading(text: "Клавиатурный тренажёр"),
+    UiRow(kids: [UiButton(id: "lang", arg: 0, label: lang_label(m.lang, 0, "English")),
+                 UiButton(id: "lang", arg: 1, label: lang_label(m.lang, 1, "Русский")),
+                 UiSelect(id: "lesson", arg: 0, value: ls[m.lesson].title, options: titles(ls)),
+                 UiButton(id: "again", arg: 0, label: "Заново"),
+                 UiCheck(id: "hint", arg: 0, label: "Подсказка: клавиатура", on: m.hint)]),
+    UiText(text: home_text(m.lang)),
+    UiHtml(html: text_html(m))]
+  if m.finish >= 0 {
+    kids.push(UiBox(title: "Урок пройден", kids: [
+      UiText(text: stats_text(m, now)),
+      UiText(text: best_line(m)),
+      UiRow(kids: [UiButton(id: "again", arg: 0, label: "Ещё раз"), UiButton(id: "next", arg: 0, label: "Следующий урок →")])]))
+    return UiCol(kids: kids)
+  }
+  kids.push(UiInput(id: "type", arg: field_key(m), value: m.typed, hint: "печатайте здесь"))
+  kids.push(UiText(text: stats_text(m, now)))
+  let note = layout_note(m.lang, m.typed)
+  if note != "" and has_mistake(m) {
+    kids.push(UiText(text: note))
+  }
+  if m.hint {
+    kids.push(UiHtml(html: keyboard_html(m.lang, want_next(m), has_mistake(m))))
+    kids.push(UiText(text: hint_text(m.lang, want_next(m), has_mistake(m))))
+  }
+  kids.push(UiText(text: best_line(m)))
+  return UiCol(kids: kids)
+}
+
+fn main() uses io, ui, clock, fs_read, fs_write {
+  var best: List[Best] = []
+  match read_file(records_file) {
+    some(t) => { best = parse_records(t) }
+    none => { }
+  }
+  match ui_listen(0, false) {
+    none => { trap("cannot open a local port for the window") }
+    some(port) => { print("Typing trainer: http://127.0.0.1:" + show(port) + "/") }
+  }
+  ui_window("Клавиатурный тренажёр")
+  var m = begin(blank() with { best: best }, 0, 0, now_ms())
+  ui_show(view(m, now_ms()))
+  var open = true
+  while open {
+    let ev = ui_next()
+    if ev == UiClosed {
+      open = false
+    }
+    let t = now_ms()
+    let m2 = update(m, ev, t)
+    if m2.best != m.best {
+      if not write_file(records_file, records_text(m2.best)) {
+        print("could not save " + records_file)
+      }
+    }
+    m = m2
+    ui_show(view(m, t))
+  }
+}

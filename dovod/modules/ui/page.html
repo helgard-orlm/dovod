@@ -34,7 +34,10 @@ var ver = 0, sent = {}, chain = Promise.resolve(), drag = false, pending = null;
 function send(s) { chain = chain.then(function () { return fetch('/event', {method: 'POST', body: s}); }).catch(function () {}); }
 function el(tag, cls, text) { var e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; }
 function key(n) { return n.id + '\n' + n.arg; }
-function change(n, v) { sent[key(n)] = v; send('change:' + key(n) + '\n' + v); }
+// every value sent for a field, newest last: an older echo of the program (typing outran it) must not
+// overwrite what is already in the field; a value the program never got from us is its own and wins
+function change(n, v) { var k = key(n), h = sent[k] || (sent[k] = []); h.push(v); if (h.length > 64) h.shift(); send('change:' + k + '\n' + v); }
+function ours(n) { var h = sent[key(n)]; return !!h && h.indexOf(n.value) >= 0; }
 function kids(parent, list, keep) { for (var i = 0; i < list.length; i++) parent.appendChild(build(list[i], keep)); return parent; }
 function build(n, keep) {
   var e, i;
@@ -44,7 +47,7 @@ function build(n, keep) {
     case 'button': e = el('button', '', n.label); e.dataset.id = key(n); e.onclick = function () { send('click:' + key(n)); }; return e;
     case 'input':
       e = el('input'); e.type = 'text'; e.dataset.id = key(n); e.placeholder = n.hint;
-      e.value = (keep && keep.id === key(n) && n.value === sent[key(n)]) ? keep.value : n.value;
+      e.value = (keep && keep.id === key(n) && ours(n)) ? keep.value : n.value;
       e.oninput = function () { change(n, e.value); }; return e;
     case 'check':
       e = el('label'); var c = el('input'); c.type = 'checkbox'; c.checked = n.on; c.dataset.id = key(n);
@@ -78,19 +81,31 @@ function build(n, keep) {
   }
   return el('p', '', '[unknown: ' + n.t + ']');
 }
+var seen = null;
+// where the focus goes after a redraw: a text field that was not on the previous screen (a new row, the next
+// line, the very first screen) — so typing can go on without a click; else the same control as before; if
+// that is gone, a text field with the same id (another row of the list); then the first text field
 function render(tree) {
   if (drag) { pending = tree; return; }   // do not pull a slider out from under the finger
   var a = document.activeElement, keep = null, app = document.getElementById('app');
   if (a && a.dataset && a.dataset.id) keep = {id: a.dataset.id, value: a.value, s: a.selectionStart, e: a.selectionEnd};
   var fresh = build(tree, keep);
   app.textContent = ''; app.appendChild(fresh);
-  if (keep) {
-    var all = app.querySelectorAll('[data-id]');
-    for (var i = 0; i < all.length; i++) if (all[i].dataset.id === keep.id) {
-      all[i].focus();
-      if (all[i].type === 'text' && keep.s !== null) { try { all[i].setSelectionRange(keep.s, keep.e); } catch (x) {} }
-      break;
-    }
+  var all = app.querySelectorAll('[data-id]'), i, to = null, same = false, now = {};
+  for (i = 0; i < all.length; i++) {
+    now[all[i].dataset.id] = 1;
+    if (!to && all[i].type === 'text' && !(seen && seen[all[i].dataset.id])) to = all[i];
+  }
+  seen = now;
+  if (!to && keep) {
+    for (i = 0; i < all.length && !to; i++) if (all[i].dataset.id === keep.id) { to = all[i]; same = true; }
+    var name = keep.id.split('\n')[0];
+    for (i = 0; i < all.length && !to; i++) if (all[i].type === 'text' && all[i].dataset.id.split('\n')[0] === name) to = all[i];
+    for (i = 0; i < all.length && !to; i++) if (all[i].type === 'text') to = all[i];
+  }
+  if (to) {
+    to.focus();
+    if (same && to.type === 'text' && keep.s !== null) { try { to.setSelectionRange(keep.s, keep.e); } catch (x) {} }
   }
 }
 function poll() {

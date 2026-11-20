@@ -40,6 +40,7 @@ bin/dovod spec video | grep -q "need pct >= 25 and pct <= 400" || { echo "FAIL: 
 # module ui: checks on its own, its example program checks, and the served page works end to end
 bin/dovod check dovod/modules/ui/ui.dv >/dev/null 2>&1 || { echo "FAIL: module ui does not check on its own"; fail=1; }
 bin/dovod check examples/prices.dv >/dev/null 2>&1 || { echo "FAIL: prices.dv (ui example)"; fail=1; }
+bin/dovod check examples/typing.dv >/dev/null 2>&1 || { echo "FAIL: typing.dv (ui example)"; fail=1; }
 bin/dovod spec ui | grep -q "show a window or page" || { echo "FAIL: spec ui"; fail=1; }
 t2=$(mktemp -d)
 bin/dovod build tests/ui_serve.dv -o "$t2/serve" >/dev/null 2>&1 || { echo "FAIL: build tests/ui_serve.dv"; fail=1; }
