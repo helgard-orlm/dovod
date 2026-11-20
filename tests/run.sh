@@ -79,7 +79,102 @@ out=$(bin/dovod check tests/vacuous/c_holes_glm.dv 2>&1)
 bin/dovod check tests/vacuous/b_meaningful.dv >/dev/null 2>&1 || { echo "FAIL: acceptance B (meaningful examples) flagged"; fail=1; }
 DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod check tests/regress_glm_review.dv >/dev/null 2>&1 || { echo "FAIL: regress_glm_review.dv"; fail=1; }
 bin/dovod trust tests/witness_shell/t.dv --witness tests/witness_shell/w.dv | grep -q "double    self-checked" || { echo "FAIL: shell witness counted"; fail=1; }
-for f in exam/runs/*/*/solution.dv; do bin/dovod check "$f" >/dev/null 2>&1 || { echo "FAIL (exam solution regressed): $f"; fail=1; }; done
+# exam solutions that were committed as passing (a fresh, uncommitted run may hold a model's failures)
+for f in $(git ls-files 'exam/runs/*/*/solution.dv'); do bin/dovod check "$f" >/dev/null 2>&1 || { echo "FAIL (exam solution regressed): $f"; fail=1; }; done
+# 0.4: Map, sort, multi-variant arms
+out=$(DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod run tests/maps.dv 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error\|LeakSanitizer" && { echo "FAIL: sanitizer report in maps.dv"; fail=1; }
+echo "$out" | grep -q '^100000 false some(100001) \[3, 10, 17\]$' || { echo "FAIL: maps.dv big map"; fail=1; }
+echo "$out" | grep -q '^{"cat": 1, "dog": 1, "end": 1, "the": 3} the \[1, 1, 1, 3\]$' || { echo "FAIL: maps.dv word count"; fail=1; }
+echo "$out" | grep -q '^{2: Stock(name: "b", qty: 10)}$' || { echo "FAIL: maps.dv records in a map"; fail=1; }
+# 0.4: habits of other languages are named, with what Dovod writes instead
+th=$(mktemp)
+habit() {   # $1 = program text, $2 = text that must appear in the diagnostics
+  printf '%s\n' "$1" > "$th"
+  bin/dovod check "$th" 2>&1 | grep -qF -- "$2" || { echo "FAIL: habit not explained: $2"; fail=1; }
+}
+habit 'def f(x):' 'a function is `fn name(x: Int)'
+habit 'fn f(xs: List[Int]) -> Bool
+  ex f([1]) == true
+{
+  return all(x > 0 for x in xs)
+}' 'no comprehensions or generator expressions'
+habit 'fn main() uses io {
+  var i = 0
+  i += 1
+  print(show(i))
+}' 'there is no `+=`'
+habit 'fn main() uses io {
+  if 1 > 0:
+}' 'a block is `{ ... }` on the same line'
+habit 'fn main() uses io {
+  print(show(slice([1, 2], 0, 1)[0:1]))
+}' 'no slice syntax'
+habit 'fn main() uses io {
+  print(show(true && false))
+}' 'Dovod writes `and`'
+habit 'fn main() uses io {
+  let x: Opt[Int] = None
+  print(show(x))
+}' 'write `none`'
+habit 'fn main() uses io {
+  for i in range(3) {
+    print(show(i))
+  }
+}' 'loop with `for i in 0..n'
+habit 'fn main() uses io {
+  print(join("a,b".split(","), " "))
+}' 'write `split(t, sep)`'
+habit 'fn main() uses io {
+  let xs = [1]
+  print(show(xs[-1]))
+}' 'the last element is `xs[len(xs) - 1]`'
+habit 'fn main() uses io {
+  let a = 1 if true else 2
+  print(show(a))
+}' 'no conditional expression'
+habit 'fn main() uses io {
+  print(show(1 in [1]))
+}' 'no `in` operator'
+habit 'fn main() uses io {
+  let m: Map[Text, Int] = {"a": 1}
+  for k in m {
+    print(k)
+  }
+}' 'for k in keys(m)'
+rm -f "$th"
+# 0.4 modules: each checks on its own; pure ones carry their examples
+bin/dovod check examples/notes.dv >/dev/null 2>&1 || { echo "FAIL: notes.dv (web + json + date + Map)"; fail=1; }
+for m in text json date files proc web; do
+  bin/dovod check "dovod/modules/$m/$m.dv" >/dev/null 2>&1 || { echo "FAIL: module $m does not check on its own"; fail=1; }
+done
+tj=$(mktemp)
+printf '{"a": [1, 2.5, -0.0, "ё\\u0436\\n", true, null], "b": {"c": {}}, "d": 1e300}' > "$tj"
+out=$(bin/dovod run tests/json_round.dv "$tj" 2>&1)
+[ "$out" = "$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1])), ensure_ascii=False, separators=(",", ":")).replace("1e+300", "1e+300").replace("2.5", "2.5").replace("-0.0", "-0").replace("[1,", "[1,"))' "$tj")" ] || { echo "FAIL: json round trip: $out"; fail=1; }
+rm -f "$tj"
+tf=$(mktemp -d)
+out=$(DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod run tests/files_demo.dv "$tf" 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error\|LeakSanitizer" && { echo "FAIL: sanitizer report in files_demo.dv"; fail=1; }
+[ "$(printf '%s\n' "$out" | tr '\n' '|')" = '[true, true, true, true]|some(["one.txt", "y"]) none|some(11) none|["x/one.txt", "x/y/ёж.txt"]|[false, true, true, true]|[false, true, true] ["x/y/ёж.txt"]|true|' ] || { echo "FAIL: files_demo.dv output"; fail=1; }
+rm -rf "$tf"
+out=$(DOVOD_CFLAGS="-fsanitize=address,undefined -g" bin/dovod run tests/proc_demo.dv 2>&1)
+echo "$out" | grep -q "ERROR\|runtime error\|LeakSanitizer" && { echo "FAIL: sanitizer report in proc_demo.dv"; fail=1; }
+[ "$(printf '%s\n' "$out" | tr '\n' '|')" = 'ProcResult(code: 0, out: "привет a b;c\n", err: "", timed_out: false)|ProcResult(code: 3, out: "out\n", err: "err\n", timed_out: false)|0 5|127 true|true -1|y|200000|' ] || { echo "FAIL: proc_demo.dv output"; fail=1; }
+tw=$(mktemp -d)
+if bin/dovod build tests/web_demo.dv -o "$tw/wd" >/dev/null 2>&1; then
+  "$tw/wd" >/dev/null 2>&1 & wpid=$!
+  sleep 1
+  curl -s localhost:8473/ | grep -q "<h1>Довод</h1><p>0</p>" || { echo "FAIL: web page"; fail=1; }
+  curl -s "localhost:8473/hello?name=%3Cx%3E" | grep -qF "hello, &lt;x&gt;" || { echo "FAIL: web param + escape"; fail=1; }
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -d 't=Новое' localhost:8473/add)" = 303 ] || { echo "FAIL: web form post"; fail=1; }
+  curl -s localhost:8473/item/5 | grep -qF '{"id":"5","title":"Новое"}' || { echo "FAIL: web route + json + state"; fail=1; }
+  curl -s localhost:8473/quit >/dev/null
+  wait $wpid || { echo "FAIL: web_demo did not stop on /quit"; fail=1; }
+else
+  echo "FAIL: build tests/web_demo.dv"; fail=1
+fi
+rm -rf "$tw"
 if command -v x86_64-w64-mingw32-gcc >/dev/null; then  # cross builds: a Windows .exe, GUI subsystem for `video`
   t=$(mktemp -d)
   bin/dovod build examples/player.dv --target win64 -o "$t/p" >/dev/null 2>&1 && file "$t/p.exe" | grep -q "(GUI), x86-64" || { echo "FAIL: win64 build of player.dv"; fail=1; }

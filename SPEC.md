@@ -1,4 +1,4 @@
-# Dovod 0.3 — the whole language
+# Dovod 0.4 — the whole language
 
 Dovod ("довод": an argument, a piece of evidence) is a small compiled language designed for AI
 agents to write and for humans to trust. This file is the complete specification; read it once and
@@ -54,10 +54,17 @@ One statement per line. A line may continue after a binary operator or inside `(
 ## Types
 
 `Int` (64-bit, overflow traps) · `Float` (64-bit) · `Bool` · `Text` (immutable UTF-8 bytes; `len`,
-`slice`, `byte` count **bytes**) · `List[T]` · `Opt[T]` · records · enums.
+`slice`, `byte` count **bytes** — letters: `use text`) · `List[T]` · `Opt[T]` · `Map[K, V]` (K is `Int` or
+`Text`) · records · enums.
 
 There is no null, no references, no generics for user functions, no closures. A record or enum
-cannot contain itself directly; nest through a list: `enum Tree { Leaf(v: Int), Node(kids: List[Tree]) }`.
+cannot contain itself directly; nest through a list (or a Map): `enum Tree { Leaf(v: Int), Node(kids: List[Tree]) }`.
+
+**Map** — a dictionary. `{}` (annotate: `var m: Map[Text, Int] = {}`), `{"a": 1, "b": 2}`. Read `m[k]`
+(traps if `k` is missing) or `get(m, k)` → `Opt[V]`; `has(m, k)`; `len(m)`. On a `var` Map: `m[k] = v` sets,
+`m.remove(k)` removes (nothing if absent). `keys(m)` and `values(m)` come **sorted by key**, and `show(m)`
+prints in key order, so a Map compares and prints the same however it was built — examples can pin it:
+`ex count("a b a") == {"a": 2, "b": 1}`. Walk it with `for k in keys(m) { … m[k] … }`. A set is a `Map[K, Bool]`.
 
 **Everything is a value.** Assigning or passing copies (the compiler avoids real copies where it
 can). Two names never alias the same data, so changing one thing never changes another.
@@ -134,6 +141,10 @@ never syntax, never rules. All its functions and constants start with `name_`, i
 with `Name`, and nothing else may start that way, so every name shows where it comes from.
 `dovod modules` lists the modules; **`dovod spec NAME` prints a module's page — read it before using
 the module**; `dovod spec modules` explains how to write one (native code behind `extern fn`).
+Built in: `text` (letters, case, padding, number formats) · `json` · `date` (calendar, clock times) ·
+`files` (folders, sizes, mkdir, append, delete) · `proc` (run programs, env vars, sleep, exit code) ·
+`web` (an HTTP site/API served by the program; fetch URLs) · `ui` (a window drawn by the browser) ·
+`video` · `ble` (Windows) · `mcu` (microcontroller boards). `text`, `json` and `date` are pure Dovod with examples.
 A module's native code is outside the evidence; `trust` says how much of it there is.
 
 ## Statements
@@ -147,6 +158,8 @@ p.x = 3.0                    // fields and elements of a `var` can be assigned
 xs[i] = v
 xs.push(v)                   // only on a `var` List
 xs.pop()                     // removes the last element; traps if empty
+m[k] = v                     // on a `var` Map: add or replace
+m.remove(k)                  // on a `var` Map; nothing happens if k is absent
 
 if cond { … } else if cond { … } else { … }      // cond must be Bool
 while cond { … }
@@ -158,6 +171,10 @@ match value {                // enums and Opt: must name every case (no `else` �
   Circle(r) => { … }         // bindings are FIELD NAMES of the variant, any subset, any order
   Rect(w, h) => { … }
   Dot => { … }
+}
+match shape {
+  Circle(r) => { … }
+  Rect, Dot => { … }         // several variants in one arm (no bindings there); still every case named
 }
 match key {                  // Int, Text, Bool: literal arms, several per arm with `,`, then a mandatory `else`
   "N", "PGDN" => { … }
@@ -185,7 +202,7 @@ data, copy it: `var mine = param`.
 
 ## Expressions
 
-Literals: `42` `3.5` `true` `false` `"text\n"` (escapes `\n \t \r \\ \" \0 \xNN` with NN in 00..7F) `[1, 2, 3]` `none` `some(x)`.
+Literals: `42` `3.5` `1e9` `2.5e-3` `true` `false` `"text\n"` (escapes `\n \t \r \\ \" \0 \xNN` with NN in 00..7F) `[1, 2, 3]` `{"k": 1}` `none` `some(x)`.
 `'a'` is an Int: the byte value of one ASCII character (`'0'` = 48, `'\n'`, `'\\'`, `'\''`) — for `byte(t, i) == '/'`.
 `[]` and `none` take their type from where they stand (a parameter, a field, a `return`); annotate a `let`.
 Constructors always name their fields: `Point(x: 1.0, y: 2.0)`, `Rect(w: 2.0, h: 3.0)`, `Dot`.
@@ -208,7 +225,7 @@ the names in scope. Use it to ask the compiler what is needed.
 ## Built-in functions (the whole standard library)
 
 ```
-len(Text|List) -> Int                 show(any) -> Text            // show(5)="5", show("a")="\"a\""
+len(Text|List|Map) -> Int             show(any) -> Text            // show(5)="5", show("a")="\"a\""
 slice(Text|List, from, to) -> same    or_else(Opt[T], T) -> T
 abs(n) min(a, b) max(a, b)            // Int or Float
 float(Int) -> Float   trunc(Float) -> Int   sqrt(Float) -> Float   near(a, b, eps) -> Bool
@@ -218,12 +235,14 @@ split(t, sep) -> List[Text]  join(List[Text], sep) -> Text
 trim(t) -> Text              replace(t, from, to) -> Text
 byte(t, i) -> Int            from_byte(Int) -> Text
 parse_int(t) -> Opt[Int]     parse_float(t) -> Opt[Float]
+sort(List[Int|Float|Text]) -> same    // a sorted copy (bytes order for Text)
+get(m, k) -> Opt[V]   has(m, k) -> Bool   keys(m) -> List[K]   values(m) -> List[V]   // Map; keys sorted
 
 print(Text)                          uses io        // adds a newline
 read_line() -> Opt[Text]             uses io        // none at end of input
 read_file(path) -> Opt[Text]         uses fs_read   // none if it cannot be read
 write_file(path, text) -> Bool       uses fs_write
-args() -> List[Text]                 uses env
+args() -> List[Text]                 uses env       // env also covers environment variables (proc_env)
 now_ms() -> Int                      uses clock
 rand_int(lo, hi) -> Int              uses rand      // inclusive
 
@@ -252,13 +271,28 @@ Workflow for an agent: write the signature and the examples first, put `?todo` i
 it lists. The ledger ends with what no example can reach (the C runtime, an effect's native code, the
 shells, whether the task was understood) — say so to the human instead of "all checked".
 
-## Not in 0.2 (deliberately small)
+## Coming from Python (the compiler says the same when it sees these)
 
-(`with` became a keyword in 0.2.) Maps, generics, closures, modules with namespaces, Unicode-aware text indexing, a formatter, network
-and process effects, proofs beyond examples. Known gap: calls made only inside `ex`/`need`/`give` are not
+| you would write                    | Dovod                                                                  |
+|------------------------------------|------------------------------------------------------------------------|
+| `def f(x):` + indentation          | `fn f(x: Int) -> Int` + `ex …` lines + `{ … }`                         |
+| `[x*2 for x in xs]`, `all(...)`    | a `for` loop — usually in a small helper `fn` with its own examples    |
+| `a if c else b`                    | `if`/`else` that sets a `var`, or `match c { true => … false => … }`   |
+| `x in xs` / `d.get(k)` / `s.split()` | `contains(t, s)` / `get(m, k)` / `split(s, sep)` — the value goes first |
+| `i += 1`, `xs[-1]`, `xs[1:3]`      | `i = i + 1`, `xs[len(xs) - 1]`, `slice(xs, 1, 3)`                      |
+| `None`, `True`, `&&`, `!x`         | `none`, `true`, `and`, `not x`                                         |
+| `try/except`, `raise`              | return `Opt[T]` (or an enum with the error); `trap("…")` for the impossible |
+| `f"n = {n}"`, `str(n)`             | `"n = " + show(n)`                                                     |
+| `sorted(xs)`, `dict`, `set`        | `sort(xs)`, `Map[K, V]`, `Map[K, Bool]`                                |
+
+## Not in 0.4 (deliberately small)
+
+(`with` became a keyword in 0.2.) Generics for user functions, closures, namespaces, a formatter, proofs
+beyond examples. Network, processes, files beyond read/write, Unicode text, JSON and dates are modules
+(`dovod modules`). Known gap: calls made only inside `ex`/`need`/`give` are not
 counted in the ledger's "rests on assumed".
 
 Runtime traps (the complete list): failed `need`/`give` · Int overflow (`+ - *`, unary `-`, `abs`) ·
-division by zero (`/`, `%`; Int and Float) · index/slice out of range (`xs[i]`, `byte`, `slice`) ·
+division by zero (`/`, `%`; Int and Float) · index/slice out of range (`xs[i]`, `byte`, `slice`) · a missing Map key (`m[k]`) ·
 `pop` on an empty list · `trunc` of a Float outside Int range · `from_byte` outside 0..255 ·
 `split`/`replace` with an empty pattern · `rand_int` with lo > hi · a module's native function on a target it has no code for · out of memory · `trap(...)`.

@@ -1,0 +1,177 @@
+// Notes: a small web site on the local network — write a note, see them newest first, delete one.
+// The notes live in notes.json next to where the program runs; GET /api/notes gives them as JSON.
+//   dovod run examples/notes.dv [PORT]        (default 8476; open http://THIS-COMPUTER:PORT/)
+// Everything the site decides is pure code with examples: `handle` and `step` below. `main` only
+// moves requests in and answers out, reads the clock and saves the file.
+use web
+use json
+use date
+use text
+
+record Note { id: Int, at: Int, text: Text }        // at = ms since 1970 (now_ms)
+record Site { notes: Map[Int, Note], next: Int }
+
+const kyiv: Int = 120                               // minutes east of UTC for the dates on the page
+
+fn empty_site() -> Site
+  ex len(empty_site().notes) == 0
+  ex empty_site().next == 1
+{
+  return Site(notes: {}, next: 1)
+}
+
+// ---- the file
+
+fn to_json(s: Site) -> Text
+  ex to_json(empty_site()) == "{\"next\":1,\"notes\":[]}"
+  ex to_json(Site(notes: {3: Note(id: 3, at: 5, text: "a\"b")}, next: 4)) == "{\"next\":4,\"notes\":[{\"id\":3,\"at\":5,\"text\":\"a\\\"b\"}]}"
+{
+  var items: List[Json] = []
+  for n in values(s.notes) {
+    items.push(JsonObj(fields: [json_field("id", JsonNum(n: float(n.id))), json_field("at", JsonNum(n: float(n.at))),
+      json_field("text", JsonText(t: n.text))]))
+  }
+  return json_show(JsonObj(fields: [json_field("next", JsonNum(n: float(s.next))), json_field("notes", JsonList(items: items))]))
+}
+
+fn from_json(t: Text) -> Site
+  ex from_json("{\"next\":4,\"notes\":[{\"id\":3,\"at\":5,\"text\":\"ёж\"}]}") == Site(notes: {3: Note(id: 3, at: 5, text: "ёж")}, next: 4)
+  ex from_json("not json") == empty_site()
+  ex from_json("{\"notes\":[{\"id\":0,\"text\":\"a\"},{\"id\":5,\"text\":\"b\"}]}") == Site(notes: {5: Note(id: 5, at: 0, text: "b")}, next: 1)
+  ex from_json("{\"next\":0,\"notes\":[{\"id\":1}]}") == Site(notes: {1: Note(id: 1, at: 0, text: "")}, next: 1)
+  ex from_json("{\"next\":3,\"notes\":[]}") == Site(notes: {}, next: 3)
+  ex from_json("{\"next\":2,\"notes\":[{\"id\":\"x\"}]}") == Site(notes: {}, next: 2)
+{
+  match json_parse(t) {
+    none => { return empty_site() }
+    some(j) => {
+      var notes: Map[Int, Note] = {}
+      for it in json_items(or_else(json_get(j, "notes"), JsonNull)) {
+        let id = json_int_at(it, "id", -1)
+        if id > 0 {
+          notes[id] = Note(id: id, at: json_int_at(it, "at", 0), text: json_text_at(it, "text", ""))
+        }
+      }
+      return Site(notes: notes, next: max(1, json_int_at(j, "next", 1)))
+    }
+  }
+}
+
+// ---- what a request does to the notes (pure)
+
+fn step(s: Site, r: WebReq, now: Int) -> Site
+  ex step(empty_site(), web_req_post("/add", "application/x-www-form-urlencoded", "text=hello"), 7) == Site(notes: {1: Note(id: 1, at: 7, text: "hello")}, next: 2)
+  ex step(empty_site(), web_req_post("/add", "application/x-www-form-urlencoded", "text=+++"), 7) == empty_site()
+  ex step(Site(notes: {1: Note(id: 1, at: 7, text: "x")}, next: 2), web_req_post("/del/1", "", ""), 9) == Site(notes: {}, next: 2)
+  ex step(Site(notes: {1: Note(id: 1, at: 7, text: "x")}, next: 2), web_req_get("/del/1"), 9) == Site(notes: {1: Note(id: 1, at: 7, text: "x")}, next: 2)
+  ex step(empty_site(), web_req_post("/del/zz", "", ""), 9) == empty_site()
+  ex step(Site(notes: {1: Note(id: 1, at: 7, text: "x")}, next: 2), web_req_post("/other", "", ""), 9) == Site(notes: {1: Note(id: 1, at: 7, text: "x")}, next: 2)
+{
+  if r.method != "POST" {
+    return s
+  }
+  if r.path == "/add" {
+    let t = trim(or_else(web_param(r, "text"), ""))
+    if t == "" {
+      return s
+    }
+    var notes = s.notes
+    notes[s.next] = Note(id: s.next, at: now, text: t)
+    return Site(notes: notes, next: s.next + 1)
+  }
+  match web_route("/del/:id", r.path) {
+    some(m) => {
+      match parse_int(or_else(get(m, "id"), "")) {
+        some(id) => {
+          var notes = s.notes
+          notes.remove(id)
+          return s with { notes: notes }
+        }
+        none => { return s }
+      }
+    }
+    none => { return s }
+  }
+}
+
+// ---- what is answered (pure)
+
+fn note_html(n: Note) -> Text
+  ex note_html(Note(id: 2, at: 0, text: "<b>")) == "<li><time>1970-01-01 02:00</time> &lt;b&gt;<form method=post action=/del/2><button>×</button></form></li>"
+{
+  let when = text_sub(date_time_text(n.at, kyiv), 0, 16)
+  return "<li><time>" + when + "</time> " + web_escape(n.text) + "<form method=post action=/del/" + show(n.id) + "><button>×</button></form></li>"
+}
+
+fn page(s: Site) -> Text
+  ex contains(page(empty_site()), "<p>No notes yet.</p>") == true
+  ex contains(page(Site(notes: {1: Note(id: 1, at: 0, text: "a")}, next: 2)), "<ul><li>") == true
+  ex contains(page(Site(notes: {1: Note(id: 1, at: 0, text: "a"), 2: Note(id: 2, at: 0, text: "b")}, next: 3)), "b<form method=post action=/del/2><button>×</button></form></li><li><time>1970-01-01 02:00</time> a") == true
+{
+  var items: List[Text] = []
+  let ids = keys(s.notes)
+  let n = len(ids)
+  for j in 0..n {
+    items.push(note_html(s.notes[ids[n - 1 - j]]))       // newest first
+  }
+  var list = "<p>No notes yet.</p>"
+  if n > 0 {
+    list = "<ul>" + join(items, "") + "</ul>"
+  }
+  return "<!doctype html><meta charset=utf-8><meta name=viewport content=\"width=device-width\"><title>Notes</title>" +
+    "<style>body{font:16px system-ui;max-width:40em;margin:2em auto;padding:0 1em}li{margin:.4em 0}" +
+    "time{color:#888;margin-right:.5em}li form{display:inline}button{margin-left:.5em}</style>" +
+    "<h1>Notes</h1><form method=post action=/add><input name=text autofocus size=40> <button>Add</button></form>" + list
+}
+
+fn handle(s: Site, r: WebReq) -> WebAnswer
+  ex handle(empty_site(), web_req_get("/")) == web_html(200, page(empty_site()))
+  ex handle(empty_site(), web_req_post("/add", "", "")) == web_redirect("/")
+  ex handle(empty_site(), web_req_post("/del/3", "", "")) == web_redirect("/")
+  ex handle(empty_site(), web_req_get("/api/notes")) == web_json(200, "{\"next\":1,\"notes\":[]}")
+  ex handle(empty_site(), web_req_get("/x")) == web_text(404, "not found")
+{
+  if r.method == "POST" {
+    return web_redirect("/")        // after a change, back to the list (a reload does not post again)
+  }
+  match r.path {
+    "/" => { return web_html(200, page(s)) }
+    "/api/notes" => { return web_json(200, to_json(s)) }
+    else => { return web_text(404, "not found") }
+  }
+}
+
+fn port_of(a: List[Text]) -> Int
+  ex port_of([]) == 8476
+  ex port_of(["9000"]) == 9000
+  ex port_of(["x"]) == 8476
+{
+  if len(a) == 0 {
+    return 8476
+  }
+  return or_else(parse_int(a[0]), 8476)
+}
+
+fn main() uses web, io, env, fs_read, fs_write, clock {
+  let port = port_of(args())
+  match web_listen(port, true) {
+    none => { trap("cannot listen on port " + show(port)) }
+    some(p) => { print("notes on http://0.0.0.0:" + show(p) + "/  (file: notes.json)") }
+  }
+  var s = from_json(or_else(read_file("notes.json"), ""))
+  while true {
+    match web_next(1000) {
+      some(r) => {
+        let s2 = step(s, r, now_ms())
+        if s2 != s {
+          s = s2
+          if not write_file("notes.json", to_json(s)) {
+            print("could not save notes.json")
+          }
+        }
+        let _sent = web_answer(r, handle(s, r))
+      }
+      none => { }
+    }
+  }
+}

@@ -439,8 +439,10 @@ def cmd_trust(res, path, witness=None):
     used = manifest(ck)
     print(f"TRUST LEDGER  {path}")
     print("  can:    " + ('; '.join(f"{ck.effect_doc[u]} ({u})" for u in used) or "nothing but compute"))
-    print("  cannot: " + '; '.join(ck.effect_doc[u] for u in ck.effects if u not in used)
-          + "; network; run other programs")
+    extra = [] if any(u in ('web', 'ui') for u in used) else ["network"]   # the only effects that open a port
+    if 'proc' not in ck.effects:                                            # module proc not loaded: no way to start a program
+        extra.append("run other programs")
+    print("  cannot: " + '; '.join([ck.effect_doc[u] for u in ck.effects if u not in used] + extra))
     print()
     shown = [f for f in res.fns if not f['module']]
     w = max([len('function')] + [len(f['name']) for f in shown])

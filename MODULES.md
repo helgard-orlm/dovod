@@ -50,6 +50,10 @@ fn relay_parse(raw: Text) -> RelayState        // ordinary Dovod: examples, stre
    `Text`, `Opt[Int|Float|Text]`, `List[Text]`. Anything richer is built in Dovod on top — parse a `Text`
    into an enum, serialise a record tree into a `Text` — where it can carry examples. (On a future
    no-heap target: only `Int`, `Float`, `Bool`.)
+   An `extern` may use a core effect when that is what it really does: `files_size` is `uses fs_read`,
+   `files_mkdir` is `uses fs_write` — a reader of the ledger then sees the familiar word. A capability
+   with a sharper edge gets its own effect (`files_delete`, `proc`, `web`), so it shows up by name.
+   Modules build on modules: `json` uses `text`, `web` uses `proc` for `web_fetch`.
 4. **`extern` carries `uses`, may carry `need`, never `give` or `ex`.** A pure `extern` is allowed but is
    reported as `assumed: native code` forever, with everything that rests on it.
 5. **Wrong target → trap, not a build error.** If the module has no native code for the build target the
