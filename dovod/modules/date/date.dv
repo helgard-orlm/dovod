@@ -1,0 +1,417 @@
+// Module `date`: calendar dates and clock times. Pure Dovod — every function carries examples.
+//
+//   use date
+//   let d = Date(year: 2026, month: 11, day: 20)
+//   date_show(date_add_months(d, 3)) == "2027-02-20"
+//   date_add_months(Date(year: 2024, month: 1, day: 31), 1) == Date(year: 2024, month: 2, day: 29)
+//   date_weekday(d) == 5                                   // 1 = Monday … 7 = Sunday
+//   date_parse("2026-11-20") == some(d)
+//   date_time_text(now_ms(), 120) == "2026-11-20 23:15:04"  // the clock, at UTC+2 (offset in minutes)
+//
+// Dates are the proleptic Gregorian calendar; `date_days` counts days from 1970-01-01 (negative before).
+// The module knows no time zones by name and no daylight saving: pass the offset from UTC yourself.
+module date
+
+record Date { year: Int, month: Int, day: Int }
+
+const date_ms_day: Int = 86400000
+
+fn date_is_leap(y: Int) -> Bool
+  ex date_is_leap(2024) == true
+  ex date_is_leap(2023) == false
+  ex date_is_leap(1900) == false
+  ex date_is_leap(2000) == true
+{
+  return (y % 4 == 0 and y % 100 != 0) or y % 400 == 0
+}
+
+fn date_month_days(y: Int, m: Int) -> Int
+  need m >= 1 and m <= 12
+  ex date_month_days(2024, 2) == 29
+  ex date_month_days(2023, 2) == 28
+  ex date_month_days(2023, 4) == 30
+  ex date_month_days(2023, 6) == 30
+  ex date_month_days(2023, 9) == 30
+  ex date_month_days(2023, 11) == 30
+  ex date_month_days(2023, 12) == 31
+  ex date_month_days(2023, 1) == 31
+{
+  match m {
+    2 => {
+      if date_is_leap(y) {
+        return 29
+      }
+      return 28
+    }
+    4, 6, 9, 11 => { return 30 }
+    else => { return 31 }
+  }
+}
+
+fn date_valid(d: Date) -> Bool
+  ex date_valid(Date(year: 2024, month: 2, day: 29)) == true
+  ex date_valid(Date(year: 2023, month: 2, day: 29)) == false
+  ex date_valid(Date(year: 2023, month: 13, day: 1)) == false
+  ex date_valid(Date(year: 2023, month: 0, day: 1)) == false
+  ex date_valid(Date(year: 2023, month: 1, day: 0)) == false
+  ex date_valid(Date(year: 2023, month: 1, day: 1)) == true
+  ex date_valid(Date(year: 2023, month: 12, day: 31)) == true
+{
+  if d.month < 1 or d.month > 12 or d.day < 1 {
+    return false
+  }
+  return d.day <= date_month_days(d.year, d.month)
+}
+
+// days since 1970-01-01 (H. Hinnant's days_from_civil)
+fn date_days(d: Date) -> Int
+  need date_valid(d)
+  ex date_days(Date(year: 1970, month: 1, day: 1)) == 0
+  ex date_days(Date(year: 2000, month: 3, day: 1)) == 11017
+  ex date_days(Date(year: 2026, month: 11, day: 20)) == 20777
+  ex date_days(Date(year: 1969, month: 12, day: 31)) == -1
+  ex date_days(Date(year: 1600, month: 2, day: 29)) == -135081
+  ex date_days(Date(year: 2024, month: 2, day: 29)) == 19782
+  ex date_days(Date(year: 2024, month: 3, day: 1)) == 19783
+  ex date_days(Date(year: -1, month: 12, day: 31)) == -719529
+  ex date_days(Date(year: 2100, month: 3, day: 1)) == 47541
+  ex date_days(Date(year: 2100, month: 2, day: 28)) == 47540
+  ex date_days(Date(year: 1900, month: 3, day: 1)) == -25508
+  ex date_days(Date(year: -400, month: 3, day: 1)) == -865565
+  ex date_days(Date(year: -401, month: 12, day: 31)) == -865626
+  ex date_days(Date(year: 0, month: 2, day: 29)) == -719469
+  ex date_days(Date(year: 1600, month: 3, day: 1)) == -135080
+  ex date_days(Date(year: 2400, month: 2, day: 29)) == 157113
+  ex date_days(Date(year: 2026, month: 1, day: 1)) == 20454
+  ex date_days(Date(year: 2026, month: 4, day: 1)) == 20544
+  ex date_days(Date(year: 2026, month: 6, day: 30)) == 20634
+  ex date_days(Date(year: 2026, month: 8, day: 1)) == 20666
+  ex date_days(Date(year: 2026, month: 10, day: 31)) == 20757
+  ex date_days(Date(year: 1, month: 1, day: 1)) == -719162
+  ex date_days(Date(year: -399, month: 2, day: 28)) == -865201
+{
+  var y = d.year
+  if d.month <= 2 {
+    y = y - 1
+  }
+  var era = y / 400
+  if y < 0 {
+    era = (y - 399) / 400
+  }
+  let yoe = y - era * 400
+  var mshift = d.month - 3
+  if d.month <= 2 {
+    mshift = d.month + 9
+  }
+  let doy = (153 * mshift + 2) / 5 + d.day - 1
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  return era * 146097 + doe - 719468
+}
+
+// the date `n` days after 1970-01-01 (H. Hinnant's civil_from_days)
+fn date_from_days(n: Int) -> Date
+  ex date_from_days(0) == Date(year: 1970, month: 1, day: 1)
+  ex date_from_days(20777) == Date(year: 2026, month: 11, day: 20)
+  ex date_from_days(-1) == Date(year: 1969, month: 12, day: 31)
+  ex date_from_days(11017) == Date(year: 2000, month: 3, day: 1)
+  ex date_from_days(11016) == Date(year: 2000, month: 2, day: 29)
+  ex date_from_days(-135081) == Date(year: 1600, month: 2, day: 29)
+  ex date_from_days(19782) == Date(year: 2024, month: 2, day: 29)
+  ex date_from_days(-719529) == Date(year: -1, month: 12, day: 31)
+  ex date_from_days(10956) == Date(year: 1999, month: 12, day: 31)
+  ex date_from_days(10957) == Date(year: 2000, month: 1, day: 1)
+  ex date_from_days(20543) == Date(year: 2026, month: 3, day: 31)
+  ex date_from_days(47541) == Date(year: 2100, month: 3, day: 1)
+  ex date_from_days(47540) == Date(year: 2100, month: 2, day: 28)
+  ex date_from_days(-25508) == Date(year: 1900, month: 3, day: 1)
+  ex date_from_days(-865565) == Date(year: -400, month: 3, day: 1)
+  ex date_from_days(-865626) == Date(year: -401, month: 12, day: 31)
+  ex date_from_days(-719469) == Date(year: 0, month: 2, day: 29)
+  ex date_from_days(-135080) == Date(year: 1600, month: 3, day: 1)
+  ex date_from_days(157113) == Date(year: 2400, month: 2, day: 29)
+  ex date_from_days(20454) == Date(year: 2026, month: 1, day: 1)
+  ex date_from_days(20544) == Date(year: 2026, month: 4, day: 1)
+  ex date_from_days(20634) == Date(year: 2026, month: 6, day: 30)
+  ex date_from_days(20666) == Date(year: 2026, month: 8, day: 1)
+  ex date_from_days(20757) == Date(year: 2026, month: 10, day: 31)
+  ex date_from_days(-719162) == Date(year: 1, month: 1, day: 1)
+  ex date_from_days(-865201) == Date(year: -399, month: 2, day: 28)
+{
+  let z = n + 719468
+  var era = z / 146097
+  if z < 0 {
+    era = (z - 146096) / 146097
+  }
+  let doe = z - era * 146097
+  let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  let mp = (5 * doy + 2) / 153
+  let day = doy - (153 * mp + 2) / 5 + 1
+  var month = mp + 3
+  if mp >= 10 {
+    month = mp - 9
+  }
+  var year = yoe + era * 400
+  if month <= 2 {
+    year = year + 1
+  }
+  return Date(year: year, month: month, day: day)
+}
+
+// 1 = Monday … 7 = Sunday
+fn date_weekday(d: Date) -> Int
+  need date_valid(d)
+  ex date_weekday(Date(year: 1970, month: 1, day: 1)) == 4
+  ex date_weekday(Date(year: 2026, month: 11, day: 20)) == 5
+  ex date_weekday(Date(year: 2026, month: 11, day: 22)) == 7
+  ex date_weekday(Date(year: 2026, month: 11, day: 23)) == 1
+  ex date_weekday(Date(year: 1969, month: 12, day: 29)) == 1
+  ex date_weekday(Date(year: 1969, month: 12, day: 28)) == 7
+{
+  let n = date_days(d) + 3          // 1970-01-01 was a Thursday
+  var w = n % 7
+  if w < 0 {
+    w = w + 7
+  }
+  return w + 1
+}
+
+fn date_add_days(d: Date, n: Int) -> Date
+  need date_valid(d)
+  ex date_add_days(Date(year: 2026, month: 12, day: 31), 1) == Date(year: 2027, month: 1, day: 1)
+  ex date_add_days(Date(year: 2024, month: 3, day: 1), -1) == Date(year: 2024, month: 2, day: 29)
+{
+  return date_from_days(date_days(d) + n)
+}
+
+// n months later (n < 0: earlier); a day past the end of the new month becomes its last day
+fn date_add_months(d: Date, n: Int) -> Date
+  need date_valid(d)
+  ex date_add_months(Date(year: 2024, month: 1, day: 31), 1) == Date(year: 2024, month: 2, day: 29)
+  ex date_add_months(Date(year: 2023, month: 1, day: 31), 1) == Date(year: 2023, month: 2, day: 28)
+  ex date_add_months(Date(year: 2026, month: 11, day: 20), 3) == Date(year: 2027, month: 2, day: 20)
+  ex date_add_months(Date(year: 2026, month: 1, day: 15), -1) == Date(year: 2025, month: 12, day: 15)
+  ex date_add_months(Date(year: 2026, month: 3, day: 31), -1) == Date(year: 2026, month: 2, day: 28)
+  ex date_add_months(Date(year: 2026, month: 5, day: 5), 24) == Date(year: 2028, month: 5, day: 5)
+  ex date_add_months(Date(year: 2026, month: 5, day: 5), -17) == Date(year: 2024, month: 12, day: 5)
+  ex date_add_months(Date(year: 2026, month: 12, day: 1), 0) == Date(year: 2026, month: 12, day: 1)
+  ex date_add_months(Date(year: 2026, month: 1, day: 30), 1) == Date(year: 2026, month: 2, day: 28)
+  ex date_add_months(Date(year: 0, month: 1, day: 15), -1) == Date(year: -1, month: 12, day: 15)
+  ex date_add_months(Date(year: 0, month: 3, day: 15), -1) == Date(year: 0, month: 2, day: 15)
+  ex date_add_months(Date(year: 2026, month: 12, day: 15), 1) == Date(year: 2027, month: 1, day: 15)
+{
+  let total = d.year * 12 + (d.month - 1) + n
+  var y = total / 12
+  var m = total % 12
+  if m < 0 {
+    m = m + 12
+    y = y - 1
+  }
+  let month = m + 1
+  return Date(year: y, month: month, day: min(d.day, date_month_days(y, month)))
+}
+
+fn date_add_years(d: Date, n: Int) -> Date
+  need date_valid(d)
+  ex date_add_years(Date(year: 2024, month: 2, day: 29), 1) == Date(year: 2025, month: 2, day: 28)
+  ex date_add_years(Date(year: 2024, month: 2, day: 29), 4) == Date(year: 2028, month: 2, day: 29)
+{
+  return date_add_months(d, n * 12)
+}
+
+// days from a to b (positive when b is later)
+fn date_diff(a: Date, b: Date) -> Int
+  need date_valid(a) and date_valid(b)
+  ex date_diff(Date(year: 2026, month: 1, day: 1), Date(year: 2026, month: 12, day: 31)) == 364
+  ex date_diff(Date(year: 2024, month: 3, day: 1), Date(year: 2024, month: 2, day: 1)) == -29
+{
+  return date_days(b) - date_days(a)
+}
+
+fn date_two(n: Int) -> Text
+  ex date_two(7) == "07"
+  ex date_two(12) == "12"
+  ex date_two(10) == "10"
+  ex date_two(9) == "09"
+{
+  if n < 10 {
+    return "0" + show(n)
+  }
+  return show(n)
+}
+
+// ISO form: "2026-11-20" (years before 1000 get leading zeros; negative years a minus)
+fn date_show(d: Date) -> Text
+  ex date_show(Date(year: 2026, month: 11, day: 20)) == "2026-11-20"
+  ex date_show(Date(year: 987, month: 1, day: 2)) == "0987-01-02"
+  ex date_show(Date(year: 5, month: 1, day: 2)) == "0005-01-02"
+  ex date_show(Date(year: 99, month: 1, day: 2)) == "0099-01-02"
+  ex date_show(Date(year: 1000, month: 1, day: 2)) == "1000-01-02"
+  ex date_show(Date(year: 100, month: 1, day: 2)) == "0100-01-02"
+  ex date_show(Date(year: 10, month: 1, day: 2)) == "0010-01-02"
+  ex date_show(Date(year: -44, month: 3, day: 15)) == "-0044-03-15"
+  ex date_show(Date(year: 0, month: 3, day: 15)) == "0000-03-15"
+{
+  var y = show(abs(d.year))
+  while len(y) < 4 {
+    y = "0" + y
+  }
+  if d.year < 0 {
+    y = "-" + y
+  }
+  return y + "-" + date_two(d.month) + "-" + date_two(d.day)
+}
+
+// "YYYY-MM-DD" → the date, if it is one (also accepts "YYYY-MM-DDT…" / "YYYY-MM-DD …" and ignores the rest)
+fn date_parse(t: Text) -> Opt[Date]
+  ex date_parse("2026-11-20") == some(Date(year: 2026, month: 11, day: 20))
+  ex date_parse("2024-02-29T10:00:00Z") == some(Date(year: 2024, month: 2, day: 29))
+  ex date_parse("2023-02-29") == none
+  ex date_parse("2023-2-1") == none
+  ex date_parse("20231-02-01") == none
+  ex date_parse("hello") == none
+  ex date_parse("2023-02-01x") == none
+  ex date_parse("2023-02-01 12:00") == some(Date(year: 2023, month: 2, day: 1))
+  ex date_parse("2023/02/01") == none
+  ex date_parse("2023-02/01") == none
+  ex date_parse("2023-0x-01") == none
+  ex date_parse("2023-02-0x") == none
+  ex date_parse("abcd-02-01") == none
+{
+  if len(t) < 10 {
+    return none
+  }
+  if len(t) > 10 and byte(t, 10) != 'T' and byte(t, 10) != ' ' {
+    return none
+  }
+  if byte(t, 4) != '-' or byte(t, 7) != '-' {
+    return none
+  }
+  let y = parse_int(slice(t, 0, 4))
+  let m = parse_int(slice(t, 5, 7))
+  let d = parse_int(slice(t, 8, 10))
+  match y {
+    some(yy) => {
+      match m {
+        some(mm) => {
+          match d {
+            some(dd) => {
+              let r = Date(year: yy, month: mm, day: dd)
+              if date_valid(r) {
+                return some(r)
+              }
+              return none
+            }
+            none => { return none }
+          }
+        }
+        none => { return none }
+      }
+    }
+    none => { return none }
+  }
+}
+
+// ---- clock times: milliseconds since 1970-01-01 00:00 UTC (what `now_ms()` gives)
+
+// the date at that moment, `offset` minutes east of UTC (Kyiv: 120 in winter, 180 in summer)
+fn date_of_ms(ms: Int, offset: Int) -> Date
+  ex date_of_ms(0, 0) == Date(year: 1970, month: 1, day: 1)
+  ex date_of_ms(-1, 0) == Date(year: 1969, month: 12, day: 31)
+  ex date_of_ms(79200000, 120) == Date(year: 1970, month: 1, day: 2)      // 22:00 UTC = 00:00 at UTC+2
+  ex date_of_ms(79199999, 120) == Date(year: 1970, month: 1, day: 1)
+  ex date_of_ms(-86400000, 0) == Date(year: 1969, month: 12, day: 31)
+{
+  let local = ms + offset * 60000
+  var days = local / date_ms_day
+  if local < 0 and local % date_ms_day != 0 {
+    days = days - 1
+  }
+  return date_from_days(days)
+}
+
+// milliseconds since local midnight at that moment
+fn date_ms_of_day(ms: Int, offset: Int) -> Int
+  ex date_ms_of_day(3723004, 0) == 3723004
+  ex date_ms_of_day(-1, 0) == 86399999
+  ex date_ms_of_day(0, 120) == 7200000
+  ex date_ms_of_day(86400000, 0) == 0
+{
+  var r = (ms + offset * 60000) % date_ms_day
+  if r < 0 {
+    r = r + date_ms_day
+  }
+  return r
+}
+
+// "HH:MM:SS" for milliseconds since midnight
+fn date_clock(ms_of_day: Int) -> Text
+  need ms_of_day >= 0 and ms_of_day < 86400000
+  ex date_clock(3723004) == "01:02:03"
+  ex date_clock(86399999) == "23:59:59"
+  ex date_clock(0) == "00:00:00"
+  ex date_clock(3600000) == "01:00:00"
+{
+  let s = ms_of_day / 1000
+  return date_two(s / 3600) + ":" + date_two(s / 60 % 60) + ":" + date_two(s % 60)
+}
+
+// "2026-11-20 23:15:04" for a moment, `offset` minutes east of UTC
+fn date_time_text(ms: Int, offset: Int) -> Text
+  ex date_time_text(1763680504000, 120) == "2025-11-21 01:15:04"
+  ex date_time_text(0, 0) == "1970-01-01 00:00:00"
+{
+  return date_show(date_of_ms(ms, offset)) + " " + date_clock(date_ms_of_day(ms, offset))
+}
+
+// the moment a date begins (local midnight), `offset` minutes east of UTC
+fn date_start_ms(d: Date, offset: Int) -> Int
+  need date_valid(d)
+  ex date_start_ms(Date(year: 1970, month: 1, day: 2), 0) == 86400000
+  ex date_start_ms(Date(year: 1970, month: 1, day: 2), 120) == 79200000
+{
+  return date_days(d) * date_ms_day - offset * 60000
+}
+
+// ---- names
+
+fn date_month_name(m: Int, lang: Text) -> Text
+  need m >= 1 and m <= 12
+  ex date_month_name(11, "en") == "November"
+  ex date_month_name(1, "ru") == "январь"
+  ex date_month_name(12, "uk") == "грудень"
+  ex date_month_name(12, "xx") == "December"
+  ex date_month_name(5, "ru") == "май"
+{
+  var names = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+    "October", "November", "December"]
+  match lang {
+    "ru" => {
+      names = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь",
+        "октябрь", "ноябрь", "декабрь"]
+    }
+    "uk" => {
+      names = ["січень", "лютий", "березень", "квітень", "травень", "червень", "липень", "серпень",
+        "вересень", "жовтень", "листопад", "грудень"]
+    }
+    else => { }
+  }
+  return names[m - 1]
+}
+
+// 1 = Monday … 7 = Sunday
+fn date_weekday_name(w: Int, lang: Text) -> Text
+  need w >= 1 and w <= 7
+  ex date_weekday_name(1, "en") == "Monday"
+  ex date_weekday_name(5, "ru") == "пятница"
+  ex date_weekday_name(7, "uk") == "неділя"
+  ex date_weekday_name(7, "en") == "Sunday"
+{
+  var names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+  match lang {
+    "ru" => { names = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"] }
+    "uk" => { names = ["понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота", "неділя"] }
+    else => { }
+  }
+  return names[w - 1]
+}
