@@ -1,0 +1,64 @@
+// module web end to end: a tiny site with a form, JSON, a route and a static-file guard
+use web
+use json
+
+record Book { title: Text, n: Int }
+
+fn handle(r: WebReq, b: Book) -> WebAnswer
+  ex handle(web_req_get("/"), Book(title: "x", n: 1)) == web_html(200, "<h1>x</h1><p>1</p><form method=post action=/add><input name=t></form>")
+  ex handle(web_req_get("/hello?name=%3Cb%3E"), Book(title: "x", n: 1)) == web_html(200, "<p>hello, &lt;b&gt;</p>")
+  ex handle(web_req_get("/hello"), Book(title: "x", n: 1)) == web_html(200, "<p>hello, stranger</p>")
+  ex handle(web_req_get("/item/42"), Book(title: "x", n: 1)) == web_json(200, "{\"id\":\"42\",\"title\":\"x\"}")
+  ex handle(web_req_get("/nope"), Book(title: "x", n: 1)) == web_text(404, "not found")
+  ex handle(web_req_post("/add", "application/x-www-form-urlencoded", "t=a+b"), Book(title: "x", n: 1)) == web_redirect("/")
+  ex handle(web_req_get("/quit"), Book(title: "x", n: 1)) == web_text(200, "bye")
+{
+  if r.path == "/" {
+    return web_html(200, "<h1>" + web_escape(b.title) + "</h1><p>" + show(b.n) + "</p><form method=post action=/add><input name=t></form>")
+  }
+  if r.path == "/hello" {
+    return web_html(200, "<p>hello, " + web_escape(or_else(web_param(r, "name"), "stranger")) + "</p>")
+  }
+  if r.path == "/add" and r.method == "POST" {
+    return web_redirect("/")
+  }
+  if r.path == "/quit" {
+    return web_text(200, "bye")
+  }
+  match web_route("/item/:id", r.path) {
+    some(m) => {
+      let j = JsonObj(fields: [json_field("id", JsonText(t: or_else(get(m, "id"), ""))), json_field("title", JsonText(t: b.title))])
+      return web_json(200, json_show(j))
+    }
+    none => { return web_text(404, "not found") }
+  }
+}
+
+fn next_book(r: WebReq, b: Book) -> Book
+  ex next_book(web_req_post("/add", "application/x-www-form-urlencoded", "t=new+title"), Book(title: "x", n: 1)) == Book(title: "new title", n: 2)
+  ex next_book(web_req_get("/"), Book(title: "x", n: 1)) == Book(title: "x", n: 1)
+{
+  if r.path == "/add" and r.method == "POST" {
+    return Book(title: or_else(web_param(r, "t"), b.title), n: b.n + 1)
+  }
+  return b
+}
+
+fn main() uses web, io {
+  match web_listen(8473, false) {
+    none => { trap("port 8473 is taken") }
+    some(p) => { print("listening on " + show(p)) }
+  }
+  var b = Book(title: "Довод", n: 0)
+  var go = true
+  while go {
+    match web_next(1000) {
+      some(r) => {
+        b = next_book(r, b)
+        let _sent = web_answer(r, handle(r, b))
+        go = r.path != "/quit"
+      }
+      none => { }
+    }
+  }
+}

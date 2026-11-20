@@ -2,6 +2,8 @@
 // The page long-polls GET /view?v=N for the interface tree (JSON made by the Dovod side) and POSTs what the
 // user does to /event. Nothing runs between calls: sockets are served only inside ui_event / ui_push,
 // so the program owns the loop. State kept here: the last tree, a queue of events, open connections.
+#ifndef DV_SOCK_H          // shared with module web: both may be in one program
+#define DV_SOCK_H
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -20,6 +22,7 @@ typedef int dv_sock;
 #define DV_BADSOCK (-1)
 #define dv_closesock close
 #define DV_NOSIG MSG_NOSIGNAL
+#endif
 #endif
 
 /*PAGE-BEGIN*/

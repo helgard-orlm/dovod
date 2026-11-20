@@ -1,6 +1,7 @@
 """Dovod command line: check | run | build | trust | card | spec."""
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,14 @@ def load(path):
             items.append(it)
 
     one(path, path)
+    # every extern must have its C function in the module's native file — say so here, not as a C error later
+    for it in items:
+        if it.k == 'Fn' and getattr(it, 'extern', False) and it.module in modules:
+            nat = modules[it.module]['native']
+            if nat and re.search(r'\bdv_' + re.escape(it.name) + r'\s*\(', open(nat, encoding='utf-8').read()) is None:
+                raise DvError(Diag('E-MODULE', it.file, it.line, it.col,
+                                   f"extern `{it.name}` has no C function `dv_{it.name}` in {os.path.basename(nat)}",
+                                   f"define `static ... dv_{it.name}(...)` there (or fix the name)"))
     return items, modules
 
 

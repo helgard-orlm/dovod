@@ -1,0 +1,496 @@
+// Module `web`: a web site or HTTP API served by the program itself, plus fetching URLs.
+//
+//   use web
+//   fn handle(r: WebReq) -> WebAnswer                  // pure: ALL the site's logic, with examples
+//     ex handle(web_req_get("/hello?name=ёж")) == web_html(200, "<p>hello, ёж</p>")
+//   { … web_param(r, "name") … web_route("/users/:id", r.path) … web_escape(text) … }
+//
+//   fn main() uses web, io {
+//     match web_listen(8080, true) {                  // true: the local network; false: this computer only
+//       none => { trap("port 8080 is taken") }
+//       some(_p) => { }
+//     }
+//     while true {
+//       match web_next(1000) {                        // waits at most 1 s for a request
+//         some(r) => { let _sent = web_answer(r, handle(r)) }
+//         none => { }                                  // a timer, a check, or nothing
+//       }
+//     }
+//   }
+//
+// One request at a time, every answer closes the connection: a home service, a tool page or an API,
+// not a high-traffic site. Bodies up to 64 MB; a request not answered in 5 minutes gets 503.
+// Requests are bytes: `body` is exactly what came (a form, JSON, a file). Header names are lower case.
+// The site is served over plain HTTP — put it behind a proxy (Traefik, nginx) for HTTPS.
+// `web_fetch` gets a URL (http and https) by running `curl` — that is why it needs `uses proc`, and
+// it works where curl exists (Linux, macOS, Windows 10+).
+module web
+use proc
+effect web "serve HTTP: other computers can send this program requests (opens a network port)"
+native "web.h"
+  links "-lws2_32" on win64, win32
+
+record WebReq { id: Int, method: Text, path: Text, query: Text, peer: Text, headers: Map[Text, Text], body: Text }
+record WebAnswer { status: Int, headers: List[Text], body: Text }
+record WebResp { status: Int, body: Text, err: Text }
+
+extern fn web_listen(port: Int, lan: Bool) -> Opt[Int] uses web     // the port really used (0 = any free)
+  need port >= 0 and port <= 65535
+extern fn web_next_raw(timeout_ms: Int) -> List[Text] uses web      // raw; use web_next
+  need timeout_ms >= 0
+extern fn web_reply(id: Int, status: Int, reason: Text, headers: Text, body: Text) -> Bool uses web   // raw; use web_answer
+  need status >= 100 and status <= 999
+
+// the next request, waiting at most timeout_ms; none if nothing came
+fn web_next(timeout_ms: Int) -> Opt[WebReq] uses web
+  need timeout_ms >= 0
+{
+  return web_parse_req(web_next_raw(timeout_ms))
+}
+
+// send the answer to the request; false if the client is gone
+fn web_answer(r: WebReq, a: WebAnswer) -> Bool uses web {
+  return web_reply(r.id, a.status, web_reason(a.status), join(a.headers, "\n"), a.body)
+}
+
+fn web_parse_req(raw: List[Text]) -> Opt[WebReq]
+  ex web_parse_req([]) == none
+  ex web_parse_req(["7", "GET", "/a/b?x=1&y=2", "10.0.0.5", "host: h\ncontent-type: text/plain\n", "hi"]) == some(WebReq(id: 7, method: "GET", path: "/a/b", query: "x=1&y=2", peer: "10.0.0.5", headers: {"host": "h", "content-type": "text/plain"}, body: "hi"))
+  ex web_parse_req(["8", "POST", "/a+b%20c", "::1", "", ""]) == some(WebReq(id: 8, method: "POST", path: "/a+b c", query: "", peer: "::1", headers: {}, body: ""))
+  ex web_parse_req(["x", "GET", "/", "", "", ""]) == none
+{
+  if len(raw) != 6 {
+    return none
+  }
+  match parse_int(raw[0]) {
+    none => { return none }
+    some(id) => {
+      var path = raw[2]
+      var query = ""
+      match find(raw[2], "?") {
+        some(q) => {
+          path = slice(raw[2], 0, q)
+          query = slice(raw[2], q + 1, len(raw[2]))
+        }
+        none => { }
+      }
+      var hs: Map[Text, Text] = {}
+      for line in split(raw[4], "\n") {
+        match find(line, ": ") {
+          some(c) => { hs[slice(line, 0, c)] = slice(line, c + 2, len(line)) }
+          none => { }
+        }
+      }
+      return some(WebReq(id: id, method: raw[1], path: web_decode(path, false), query: query, peer: raw[3],
+        headers: hs, body: raw[5]))
+    }
+  }
+}
+
+// a request made by hand, for examples of a handler: web_req_get("/x?a=1")
+fn web_req_get(target: Text) -> WebReq
+  ex web_req_get("/x?a=1") == WebReq(id: 0, method: "GET", path: "/x", query: "a=1", peer: "", headers: {}, body: "")
+{
+  return or_else(web_parse_req(["0", "GET", target, "", "", ""]), WebReq(id: 0, method: "GET", path: target, query: "", peer: "", headers: {}, body: ""))
+}
+
+fn web_req_post(target: Text, ctype: Text, body: Text) -> WebReq
+  ex web_req_post("/f", "text/plain", "x") == WebReq(id: 0, method: "POST", path: "/f", query: "", peer: "", headers: {"content-type": "text/plain"}, body: "x")
+{
+  let r = web_req_get(target)
+  return r with { method: "POST", headers: {"content-type": ctype}, body: body }
+}
+
+// ---- answers
+
+fn web_html(status: Int, html: Text) -> WebAnswer
+  ex web_html(200, "<b>x</b>") == WebAnswer(status: 200, headers: ["Content-Type: text/html; charset=utf-8"], body: "<b>x</b>")
+{
+  return WebAnswer(status: status, headers: ["Content-Type: text/html; charset=utf-8"], body: html)
+}
+
+fn web_text(status: Int, text: Text) -> WebAnswer
+  ex web_text(404, "no") == WebAnswer(status: 404, headers: ["Content-Type: text/plain; charset=utf-8"], body: "no")
+{
+  return WebAnswer(status: status, headers: ["Content-Type: text/plain; charset=utf-8"], body: text)
+}
+
+// `json` is JSON text (use module json to make it)
+fn web_json(status: Int, json: Text) -> WebAnswer
+  ex web_json(200, "{}") == WebAnswer(status: 200, headers: ["Content-Type: application/json; charset=utf-8"], body: "{}")
+{
+  return WebAnswer(status: status, headers: ["Content-Type: application/json; charset=utf-8"], body: json)
+}
+
+fn web_redirect(to: Text) -> WebAnswer
+  ex web_redirect("/done") == WebAnswer(status: 303, headers: ["Location: /done"], body: "")
+{
+  return WebAnswer(status: 303, headers: ["Location: " + web_header_safe(to)], body: "")
+}
+
+// a file's bytes with the content type guessed from its name
+fn web_file(name: Text, bytes: Text) -> WebAnswer
+  ex web_file("a.css", "x") == WebAnswer(status: 200, headers: ["Content-Type: text/css; charset=utf-8"], body: "x")
+{
+  return WebAnswer(status: 200, headers: ["Content-Type: " + web_ctype(name)], body: bytes)
+}
+
+// no line breaks in a header value (they would let a value write more headers)
+fn web_header_safe(v: Text) -> Text
+  ex web_header_safe("a\r\nSet-Cookie: x") == "aSet-Cookie: x"
+  ex web_header_safe("/ok") == "/ok"
+{
+  return replace(replace(v, "\r", ""), "\n", "")
+}
+
+fn web_reason(status: Int) -> Text
+  ex web_reason(200) == "OK"
+  ex web_reason(404) == "Not Found"
+  ex web_reason(299) == "Status"
+  ex web_reason(201) == "Created"
+  ex web_reason(204) == "No Content"
+  ex web_reason(301) == "Moved Permanently"
+  ex web_reason(302) == "Found"
+  ex web_reason(303) == "See Other"
+  ex web_reason(304) == "Not Modified"
+  ex web_reason(400) == "Bad Request"
+  ex web_reason(401) == "Unauthorized"
+  ex web_reason(403) == "Forbidden"
+  ex web_reason(405) == "Method Not Allowed"
+  ex web_reason(413) == "Content Too Large"
+  ex web_reason(500) == "Internal Server Error"
+  ex web_reason(503) == "Service Unavailable"
+{
+  match status {
+    200 => { return "OK" }
+    201 => { return "Created" }
+    204 => { return "No Content" }
+    301 => { return "Moved Permanently" }
+    302 => { return "Found" }
+    303 => { return "See Other" }
+    304 => { return "Not Modified" }
+    400 => { return "Bad Request" }
+    401 => { return "Unauthorized" }
+    403 => { return "Forbidden" }
+    404 => { return "Not Found" }
+    405 => { return "Method Not Allowed" }
+    413 => { return "Content Too Large" }
+    500 => { return "Internal Server Error" }
+    503 => { return "Service Unavailable" }
+    else => { return "Status" }
+  }
+}
+
+// content type by file extension
+fn web_ctype(name: Text) -> Text
+  ex web_ctype("x/index.html") == "text/html; charset=utf-8"
+  ex web_ctype("a.JS") == "text/javascript; charset=utf-8"
+  ex web_ctype("pic.png") == "image/png"
+  ex web_ctype("noext") == "application/octet-stream"
+  ex web_ctype("a.htm") == "text/html; charset=utf-8"
+  ex web_ctype("a.css") == "text/css; charset=utf-8"
+  ex web_ctype("a.mjs") == "text/javascript; charset=utf-8"
+  ex web_ctype("a.json") == "application/json; charset=utf-8"
+  ex web_ctype("a.txt") == "text/plain; charset=utf-8"
+  ex web_ctype("a.md") == "text/plain; charset=utf-8"
+  ex web_ctype("a.svg") == "image/svg+xml"
+  ex web_ctype("a.jpg") == "image/jpeg"
+  ex web_ctype("a.jpeg") == "image/jpeg"
+  ex web_ctype("a.gif") == "image/gif"
+  ex web_ctype("a.webp") == "image/webp"
+  ex web_ctype("a.ico") == "image/x-icon"
+  ex web_ctype("a.mp3") == "audio/mpeg"
+  ex web_ctype("a.m4a") == "audio/mp4"
+  ex web_ctype("a.mp4") == "video/mp4"
+  ex web_ctype("a.wav") == "audio/wav"
+  ex web_ctype("a.pdf") == "application/pdf"
+  ex web_ctype("a.wasm") == "application/wasm"
+  ex web_ctype("a.zip") == "application/zip"
+  ex web_ctype(".b/c") == "application/octet-stream"
+  ex web_ctype("a.xyz") == "application/octet-stream"
+  ex web_ctype(".css") == "text/css; charset=utf-8"
+  ex web_ctype("A.ZIP") == "application/zip"
+  ex web_ctype("a.WAV") == "audio/wav"
+{
+  var dot = -1
+  for i in 0..len(name) {
+    let c = byte(name, i)
+    if c == '.' {
+      dot = i
+    } else if c == '/' {
+      dot = -1
+    }
+  }
+  if dot < 0 {
+    return "application/octet-stream"
+  }
+  var ext = ""
+  for i in dot + 1..len(name) {
+    var c = byte(name, i)
+    if c >= 'A' and c <= 'Z' {
+      c = c + 32
+    }
+    ext = ext + from_byte(c)
+  }
+  match ext {
+    "html", "htm" => { return "text/html; charset=utf-8" }
+    "css" => { return "text/css; charset=utf-8" }
+    "js", "mjs" => { return "text/javascript; charset=utf-8" }
+    "json" => { return "application/json; charset=utf-8" }
+    "txt", "md" => { return "text/plain; charset=utf-8" }
+    "svg" => { return "image/svg+xml" }
+    "png" => { return "image/png" }
+    "jpg", "jpeg" => { return "image/jpeg" }
+    "gif" => { return "image/gif" }
+    "webp" => { return "image/webp" }
+    "ico" => { return "image/x-icon" }
+    "mp3" => { return "audio/mpeg" }
+    "m4a" => { return "audio/mp4" }
+    "mp4" => { return "video/mp4" }
+    "wav" => { return "audio/wav" }
+    "pdf" => { return "application/pdf" }
+    "wasm" => { return "application/wasm" }
+    "zip" => { return "application/zip" }
+    else => { return "application/octet-stream" }
+  }
+}
+
+// ---- reading requests
+
+fn web_hexval(c: Int) -> Int
+  ex web_hexval('7') == 7
+  ex web_hexval('b') == 11
+  ex web_hexval('C') == 12
+  ex web_hexval('x') == -1
+  ex web_hexval('0') == 0
+  ex web_hexval('9') == 9
+  ex web_hexval('a') == 10
+  ex web_hexval('f') == 15
+  ex web_hexval('A') == 10
+  ex web_hexval('F') == 15
+  ex web_hexval('/') == -1
+  ex web_hexval(':') == -1
+  ex web_hexval('`') == -1
+  ex web_hexval('g') == -1
+  ex web_hexval('@') == -1
+  ex web_hexval('G') == -1
+{
+  if c >= '0' and c <= '9' {
+    return c - '0'
+  }
+  if c >= 'a' and c <= 'f' {
+    return c - 'a' + 10
+  }
+  if c >= 'A' and c <= 'F' {
+    return c - 'A' + 10
+  }
+  return -1
+}
+
+// %XX → the byte; with plus_space, "+" → " " (query strings and forms, not paths)
+fn web_decode(t: Text, plus_space: Bool) -> Text
+  ex web_decode("a%20b%D1%91", false) == "a bё"
+  ex web_decode("a+b", true) == "a b"
+  ex web_decode("a+b", false) == "a+b"
+  ex web_decode("100%", false) == "100%"
+  ex web_decode("%zz", false) == "%zz"
+  ex web_decode("%4", false) == "%4"
+  ex web_decode("%41", false) == "A"
+  ex web_decode("%4z", false) == "%4z"
+  ex web_decode("%0A", false) == "\n"
+  ex web_decode("%z4", false) == "%z4"
+{
+  var parts: List[Text] = []
+  var i = 0
+  var start = 0
+  while i < len(t) {
+    let c = byte(t, i)
+    if c == '%' and i + 2 < len(t) and web_hexval(byte(t, i + 1)) >= 0 and web_hexval(byte(t, i + 2)) >= 0 {
+      parts.push(slice(t, start, i))
+      parts.push(from_byte(web_hexval(byte(t, i + 1)) * 16 + web_hexval(byte(t, i + 2))))
+      i = i + 3
+      start = i
+    } else if c == '+' and plus_space {
+      parts.push(slice(t, start, i))
+      parts.push(" ")
+      i = i + 1
+      start = i
+    } else {
+      i = i + 1
+    }
+  }
+  parts.push(slice(t, start, len(t)))
+  return join(parts, "")
+}
+
+// text → %XX form for a URL part (letters, digits and -_.~ stay)
+fn web_encode(t: Text) -> Text
+  ex web_encode("a b/ё") == "a%20b%2F%D1%91"
+  ex web_encode("Az09-_.~") == "Az09-_.~"
+  ex web_encode("@[`{") == "%40%5B%60%7B"
+  ex web_encode("/:") == "%2F%3A"
+  ex web_encode("z") == "z"
+  ex web_encode("Z9") == "Z9"
+{
+  var parts: List[Text] = []
+  for i in 0..len(t) {
+    let c = byte(t, i)
+    if (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '-' or c == '_' or c == '.' or c == '~' {
+      parts.push(from_byte(c))
+    } else {
+      parts.push("%" + slice("0123456789ABCDEF", c / 16, c / 16 + 1) + slice("0123456789ABCDEF", c % 16, c % 16 + 1))
+    }
+  }
+  return join(parts, "")
+}
+
+// "a=1&b=x+y" → {"a": "1", "b": "x y"} (a repeated name keeps the last value)
+fn web_params(q: Text) -> Map[Text, Text]
+  ex web_params("a=1&b=x+y&c") == {"a": "1", "b": "x y", "c": ""}
+  ex web_params("") == {}
+  ex web_params("a=1&&a=2") == {"a": "2"}
+  ex web_params("%D1%91=%D0%B6") == {"ё": "ж"}
+  ex web_params("a+b&x+y=1") == {"a b": "", "x y": "1"}
+{
+  var m: Map[Text, Text] = {}
+  for part in split(q, "&") {
+    if part != "" {
+      match find(part, "=") {
+        some(e) => { m[web_decode(slice(part, 0, e), true)] = web_decode(slice(part, e + 1, len(part)), true) }
+        none => { m[web_decode(part, true)] = "" }
+      }
+    }
+  }
+  return m
+}
+
+// a query parameter, or — for a POST of a form — a form field
+fn web_param(r: WebReq, name: Text) -> Opt[Text]
+  ex web_param(web_req_get("/s?q=%D1%91%D0%B6"), "q") == some("ёж")
+  ex web_param(web_req_get("/s"), "q") == none
+  ex web_param(web_req_post("/s", "application/x-www-form-urlencoded", "q=a+b"), "q") == some("a b")
+  ex web_param(web_req_post("/s", "text/plain", "q=a+b"), "q") == none
+{
+  match get(web_params(r.query), name) {
+    some(v) => { return some(v) }
+    none => { }
+  }
+  if starts_with(or_else(get(r.headers, "content-type"), ""), "application/x-www-form-urlencoded") {
+    return get(web_params(r.body), name)
+  }
+  return none
+}
+
+// match a path against a pattern with :names — "/users/:id" and "/users/7" → {"id": "7"}
+fn web_route(pattern: Text, path: Text) -> Opt[Map[Text, Text]]
+  ex web_route("/users/:id", "/users/7") == some({"id": "7"})
+  ex web_route("/users/:id", "/users/7/x") == none
+  ex web_route("/users/:id", "/user/7") == none
+  ex web_route("/", "/") == some({})
+  ex web_route("/a/:x/b/:y", "/a/1/b/%D1%91") == some({"x": "1", "y": "%D1%91"})
+  ex web_route("/a/:x", "/a/") == none
+  ex web_route("a/:x", "b/1") == none
+{
+  let ps = split(pattern, "/")
+  let xs = split(path, "/")
+  if len(ps) != len(xs) {
+    return none
+  }
+  var m: Map[Text, Text] = {}
+  for i in 0..len(ps) {
+    if starts_with(ps[i], ":") {
+      if xs[i] == "" {
+        return none
+      }
+      m[slice(ps[i], 1, len(ps[i]))] = xs[i]
+    } else if ps[i] != xs[i] {
+      return none
+    }
+  }
+  return some(m)
+}
+
+// text safe to put inside HTML (and inside a quoted attribute)
+fn web_escape(t: Text) -> Text
+  ex web_escape("<a href=\"x\">Tom & 'Jerry'</a>") == "&lt;a href=&quot;x&quot;&gt;Tom &amp; &#39;Jerry&#39;&lt;/a&gt;"
+  ex web_escape("ёж") == "ёж"
+{
+  return replace(replace(replace(replace(replace(t, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")
+}
+
+// a request path made safe to join to a folder: no "..", no empty or "." parts; none if it tries to climb
+fn web_safe_path(path: Text) -> Opt[Text]
+  ex web_safe_path("/css/site.css") == some("css/site.css")
+  ex web_safe_path("/a//./b") == some("a/b")
+  ex web_safe_path("/../etc/passwd") == none
+  ex web_safe_path("/a/..") == none
+  ex web_safe_path("/") == some("")
+  ex web_safe_path("/a\\..\\b") == none
+{
+  if contains(path, "\\") {
+    return none
+  }
+  var parts: List[Text] = []
+  for p in split(path, "/") {
+    if p == ".." {
+      return none
+    }
+    if p != "" and p != "." {
+      parts.push(p)
+    }
+  }
+  return some(join(parts, "/"))
+}
+
+// ---- fetching (through curl)
+
+fn web_curl_argv(method: Text, url: Text, headers: List[Text], has_body: Bool, timeout_ms: Int) -> List[Text]
+  ex web_curl_argv("GET", "https://x.y/", [], false, 5000) == ["curl", "-sS", "-L", "-X", "GET", "--max-time", "5", "-o", "-", "-w", "\n%{http_code}", "https://x.y/"]
+  ex web_curl_argv("POST", "http://h/", ["A: b"], true, 1500) == ["curl", "-sS", "-L", "-X", "POST", "--max-time", "2", "-o", "-", "-w", "\n%{http_code}", "-H", "A: b", "--data-binary", "@-", "http://h/"]
+  ex web_curl_argv("GET", "http://h/", [], false, 0) == ["curl", "-sS", "-L", "-X", "GET", "--max-time", "1", "-o", "-", "-w", "\n%{http_code}", "http://h/"]
+  ex web_curl_argv("GET", "http://h/", [], false, 1000) == ["curl", "-sS", "-L", "-X", "GET", "--max-time", "1", "-o", "-", "-w", "\n%{http_code}", "http://h/"]
+  ex web_curl_argv("GET", "http://h/", [], false, 1001) == ["curl", "-sS", "-L", "-X", "GET", "--max-time", "2", "-o", "-", "-w", "\n%{http_code}", "http://h/"]
+{
+  let secs = max(1, (timeout_ms + 999) / 1000)
+  var a = ["curl", "-sS", "-L", "-X", method, "--max-time", show(secs), "-o", "-", "-w", "\n%{http_code}"]
+  for h in headers {
+    a = a + ["-H", web_header_safe(h)]
+  }
+  if has_body {
+    a = a + ["--data-binary", "@-"]
+  }
+  return a + [url]
+}
+
+// curl's output is the body, a line break, then the status code
+fn web_curl_parse(code: Int, stdout: Text, err: Text) -> WebResp
+  ex web_curl_parse(0, "hello\n200", "") == WebResp(status: 200, body: "hello", err: "")
+  ex web_curl_parse(0, "\n404", "") == WebResp(status: 404, body: "", err: "")
+  ex web_curl_parse(6, "\n000", "curl: (6) Could not resolve host") == WebResp(status: 0, body: "", err: "curl: (6) Could not resolve host")
+  ex web_curl_parse(127, "", "cannot start the program") == WebResp(status: 0, body: "", err: "cannot start the program")
+  ex web_curl_parse(0, "no code", "") == WebResp(status: 0, body: "", err: "unexpected curl output")
+  ex web_curl_parse(0, "x\nabc", "") == WebResp(status: 0, body: "", err: "unexpected curl output")
+{
+  if code != 0 {
+    return WebResp(status: 0, body: "", err: trim(err))
+  }
+  var nl = -1
+  for i in 0..len(stdout) {
+    if byte(stdout, i) == '\n' {
+      nl = i
+    }
+  }
+  if nl < 0 {
+    return WebResp(status: 0, body: "", err: "unexpected curl output")
+  }
+  match parse_int(slice(stdout, nl + 1, len(stdout))) {
+    some(s) => { return WebResp(status: s, body: slice(stdout, 0, nl), err: "") }
+    none => { return WebResp(status: 0, body: "", err: "unexpected curl output") }
+  }
+}
+
+// get a URL (GET, or POST/PUT/... with a body); follows redirects; status 0 + err when it failed
+fn web_fetch(method: Text, url: Text, headers: List[Text], body: Text, timeout_ms: Int) -> WebResp uses proc {
+  let r = proc_run(web_curl_argv(method, url, headers, body != "", timeout_ms), body, timeout_ms + 2000)
+  return web_curl_parse(r.code, r.out, r.err)
+}
