@@ -1,0 +1,64 @@
+// Module `proc`: run other programs and wait for them; also sleep, environment variables, exit code.
+//
+//   use proc
+//   let r = proc_run(["git", "status", "--short"], "", 10000)     // argv, text for its stdin, timeout ms
+//   if r.code == 0 { print(r.out) } else { print("git failed: " + r.err) }
+//
+// The program is started directly (no shell between): arguments go as they are, nothing is
+// re-split or expanded, so a file name with spaces or `;` is safe. `proc_shell` is the exception —
+// it hands one line to `sh -c` (Windows: `cmd /c`); never build that line from outside input.
+// The effect `proc` means: this program can make another program do ANYTHING that program can do.
+// `dovod trust` cannot see inside it — that is the honest reading of `uses proc`.
+// Code 127: the program could not be started (its reason is in `err`). Timeout: the process is killed,
+// `timed_out` is true and `code` is -1. timeout_ms <= 0 waits forever.
+module proc
+effect proc "run other programs (they can do anything they are able to)"
+native "proc.h"
+
+record ProcResult { code: Int, out: Text, err: Text, timed_out: Bool }
+
+extern fn proc_run_raw(argv: List[Text], input: Text, timeout_ms: Int) -> List[Text] uses proc   // raw; use proc_run
+  need len(argv) > 0
+extern fn proc_sleep(ms: Int) uses clock
+  need ms >= 0
+extern fn proc_env(name: Text) -> Opt[Text] uses env          // an environment variable
+extern fn proc_exit(code: Int) uses io                        // stop the program now with this exit code
+  need code >= 0 and code <= 255
+
+fn proc_run(argv: List[Text], input: Text, timeout_ms: Int) -> ProcResult uses proc
+  need len(argv) > 0
+{
+  return proc_parse(proc_run_raw(argv, input, timeout_ms))
+}
+
+// one line through the system shell (sh -c / cmd /c): pipes and globs work — and so does injection
+fn proc_shell(line: Text, timeout_ms: Int) -> ProcResult uses proc, env {
+  return proc_run(proc_shell_argv(line, proc_is_windows()), "", timeout_ms)
+}
+
+fn proc_shell_argv(line: Text, windows: Bool) -> List[Text]
+  ex proc_shell_argv("ls | wc -l", false) == ["sh", "-c", "ls | wc -l"]
+  ex proc_shell_argv("dir", true) == ["cmd", "/c", "dir"]
+{
+  if windows {
+    return ["cmd", "/c", line]
+  }
+  return ["sh", "-c", line]
+}
+
+// true when the program runs on Windows (from the environment: Windows always sets OS=Windows_NT)
+fn proc_is_windows() -> Bool uses env {
+  return or_else(proc_env("OS"), "") == "Windows_NT"
+}
+
+fn proc_parse(raw: List[Text]) -> ProcResult
+  ex proc_parse(["0", "hi\n", "", "0"]) == ProcResult(code: 0, out: "hi\n", err: "", timed_out: false)
+  ex proc_parse(["-1", "", "", "1"]) == ProcResult(code: -1, out: "", err: "", timed_out: true)
+  ex proc_parse(["x"]) == ProcResult(code: 127, out: "", err: "bad answer from the native side", timed_out: false)
+  ex proc_parse(["5", "a", "b", "0"]) == ProcResult(code: 5, out: "a", err: "b", timed_out: false)
+{
+  if len(raw) != 4 {
+    return ProcResult(code: 127, out: "", err: "bad answer from the native side", timed_out: false)
+  }
+  return ProcResult(code: or_else(parse_int(raw[0]), 127), out: raw[1], err: raw[2], timed_out: raw[3] == "1")
+}

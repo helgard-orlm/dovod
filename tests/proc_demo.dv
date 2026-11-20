@@ -1,0 +1,24 @@
+// module proc end to end (posix): stdout, stderr, stdin, exit codes, a missing program, a timeout
+use proc
+
+fn main() uses io, proc, clock, env {
+  let a = proc_run(["echo", "привет", "a b;c"], "", 5000)
+  print(show(a))
+  let b = proc_run(["sh", "-c", "echo out; echo err >&2; exit 3"], "", 5000)
+  print(show(b))
+  let c = proc_run(["wc", "-c"], "12345", 5000)
+  print(show(c.code) + " " + trim(c.out))
+  let d = proc_run(["no-such-program-xyz"], "", 5000)
+  print(show(d.code) + " " + show(starts_with(d.err, "cannot start the program")))
+  let e = proc_run(["sleep", "5"], "", 300)
+  print(show(e.timed_out) + " " + show(e.code))
+  let f = proc_shell("printf '%s' x | tr x y", 5000)
+  print(f.out)
+  var big = ""
+  for _i in 0..20000 {
+    big = big + "0123456789"
+  }
+  let g = proc_run(["cat"], big, 5000)
+  print(show(len(g.out)))
+  proc_sleep(10)
+}

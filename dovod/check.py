@@ -7,7 +7,7 @@ SCALARS = ('Int', 'Float', 'Bool', 'Text')
 EFFECTS = ('io', 'fs_read', 'fs_write', 'env', 'clock', 'rand')   # the core; modules add their own
 EFFECT_DOC = {
     'io': 'read/write the console', 'fs_read': 'read files', 'fs_write': 'write files',
-    'env': 'read command-line arguments', 'clock': 'read the clock', 'rand': 'use randomness',
+    'env': 'read command-line arguments and environment variables', 'clock': 'read the clock', 'rand': 'use randomness',
 }
 OI, OF, OT, LT = ('Opt', 'Int'), ('Opt', 'Float'), ('Opt', 'Text'), ('List', 'Text')
 
