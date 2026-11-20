@@ -1,0 +1,70 @@
+// Map[K, V]: the core dictionary. Keys Int or Text; keys(), values(), show() go in key order.
+record Stock { name: Text, qty: Int }
+
+fn count_words(t: Text) -> Map[Text, Int]
+  ex count_words("a b a") == {"a": 2, "b": 1}
+  ex count_words("") == {}
+  ex len(count_words("x y z x")) == 3
+{
+  var m: Map[Text, Int] = {}
+  for w in split(t, " ") {
+    if w != "" {
+      m[w] = or_else(get(m, w), 0) + 1
+    }
+  }
+  return m
+}
+
+fn top(m: Map[Text, Int]) -> Text
+  ex top({"a": 1, "b": 5, "c": 2}) == "b"
+  ex top({}) == ""
+{
+  var best = ""
+  var n = 0
+  for k in keys(m) {
+    if m[k] > n {
+      n = m[k]
+      best = k
+    }
+  }
+  return best
+}
+
+fn drop_small(m: Map[Int, Stock], below: Int) -> Map[Int, Stock]
+  ex drop_small({1: Stock(name: "a", qty: 1), 2: Stock(name: "b", qty: 9)}, 5) == {2: Stock(name: "b", qty: 9)}
+  ex drop_small({}, 5) == {}
+{
+  var r = m
+  for id in keys(m) {
+    if m[id].qty < below {
+      r.remove(id)
+    }
+  }
+  return r
+}
+
+fn bump(m: Map[Int, Stock], id: Int) -> Map[Int, Stock]
+  ex bump({7: Stock(name: "x", qty: 1)}, 7) == {7: Stock(name: "x", qty: 2)}
+{
+  var r = m
+  r[id].qty = r[id].qty + 1
+  return r
+}
+
+fn main() uses io {
+  var big: Map[Int, Int] = {}
+  for i in 0..200000 {
+    big[i * 7 % 1000003] = i
+  }
+  for i in 0..100000 {
+    big.remove(i * 7 % 1000003)
+  }
+  print(show(len(big)) + " " + show(has(big, 7)) + " " + show(get(big, 700007)) + " " + show(slice(keys(big), 0, 3)))
+  let c = count_words("the cat the dog the end")
+  print(show(c) + " " + top(c) + " " + show(values(c)))
+  let s = bump(drop_small({1: Stock(name: "a", qty: 1), 2: Stock(name: "b", qty: 9)}, 5), 2)
+  print(show(s))
+  let nested: Map[Text, List[Text]] = {"x": ["1", "2"], "y": []}
+  let copy = nested
+  print(show(copy == nested) + " " + show(nested))
+}

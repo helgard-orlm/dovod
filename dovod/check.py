@@ -38,10 +38,58 @@ BUILTINS = {
     'now_ms': ([], 'Int', 'clock'),
     'rand_int': (['Int', 'Int'], 'Int', 'rand'),
 }
-POLY = ('len', 'show', 'slice', 'or_else', 'abs', 'min', 'max')
+POLY = ('len', 'show', 'slice', 'or_else', 'abs', 'min', 'max', 'get', 'has', 'keys', 'values', 'sort')
+MAP_KEYS = ('Int', 'Text')
+# Functions other languages have, and what Dovod writes instead (shown with E-NAME).
+FOREIGN_FN = {
+    'str': "use `show(x)`", 'string': "use `show(x)`", 'to_string': "use `show(x)`", 'repr': "use `show(x)`",
+    'int': "use `trunc(f)` for Float or `parse_int(t)` for Text", 'float': None,
+    'append': "use the statement `xs.push(x)`",
+    'range': "loop with `for i in 0..n { ... }`",
+    'enumerate': "loop with `for i in 0..len(xs) { let x = xs[i] ... }`",
+    'sorted': "use `sort(xs)` (a sorted copy; Int, Float or Text elements)",
+    'reversed': "loop backwards: `for j in 0..n { let x = xs[n - 1 - j] ... }`",
+    'reverse': "loop backwards: `for j in 0..n { let x = xs[n - 1 - j] ... }`",
+    'sum': "add up in a `for` loop (in a helper fn with examples)",
+    'any': "no generators: write a helper `fn` with a `for` loop and examples",
+    'all': "no generators: write a helper `fn` with a `for` loop and examples",
+    'map': "no higher-order functions: write a `for` loop that pushes into a `var` List",
+    'filter': "no higher-order functions: write a `for` loop that pushes into a `var` List",
+    'zip': "loop over indexes: `for i in 0..len(xs) { ... xs[i] ... ys[i] ... }`",
+    'input': "use `read_line()` (needs `uses io`; returns Opt[Text])",
+    'open': "use `read_file(path)` / `write_file(path, text)`; more in `use files`",
+    'isinstance': "types are static; for an enum use `match`", 'type': "types are static; for an enum use `match`",
+    'round': "use `trunc(x + 0.5)` (positive x) or `text_fixed(x, digits)` from `use text`",
+    'pow': "multiply in a loop; Int overflow traps", 'exit': "return from `main`, or `trap(\"why\")`",
+    'upper': "`text_upper(t)` from `use text`", 'lower': "`text_lower(t)` from `use text`",
+    'strip': "use `trim(t)`", 'startswith': "use `starts_with(t, p)`", 'endswith': "use `ends_with(t, p)`",
+    'ord': "use `byte(t, i)` (or a literal like `'a'`); Unicode: `text_code(t, i)` from `use text`",
+    'chr': "use `from_byte(n)`; Unicode: `text_from_code(n)` from `use text`",
+    'dict': "a dictionary is `Map[K, V]`: `var m: Map[Text, Int] = {}`", 'set': "a set is a `Map[K, Bool]`",
+    'list': "a list is `List[T]`: `var xs: List[Int] = []`", 'length': "use `len(x)`", 'size': "use `len(x)`",
+    'count': "count in a `for` loop", 'index': "use `find(t, sub)` for Text; for a List a helper `fn` with a loop",
+    'items': "`for k in keys(m) { ... m[k] ... }`", 'split_lines': "use `split(t, \"\\n\")`",
+    'format': "build Text with `+` and `show(x)`", 'printf': "use `print(text)`", 'println': "use `print(text)`",
+    'sleep': "`use proc` and `proc_sleep(ms)`", 'len_': None,
+}
+# Methods other languages call on a value: in Dovod the value goes first into a function.
+FOREIGN_METHOD = {
+    'append': '.push(x)', 'add': '.push(x)', 'extend': '`xs = xs + more`', 'insert': '`slice(xs, 0, i) + [x] + slice(xs, i, len(xs))`',
+    'split': 'split(t, sep)', 'strip': 'trim(t)', 'trim': 'trim(t)', 'join': 'join(parts, sep)', 'replace': 'replace(t, a, b)',
+    'startswith': 'starts_with(t, p)', 'endswith': 'ends_with(t, p)', 'find': 'find(t, sub)', 'contains': 'contains(t, sub)',
+    'get': 'get(m, k)', 'keys': 'keys(m)', 'values': 'values(m)', 'items': 'keys(m) and m[k]', 'has': 'has(m, k)',
+    'len': 'len(x)', 'length': 'len(x)', 'size': 'len(x)', 'sort': 'sort(xs)', 'lower': 'text_lower(t) (use text)',
+    'upper': 'text_upper(t) (use text)', 'to_string': 'show(x)', 'toString': 'show(x)', 'format': '`+` and show(x)',
+}
+
+
+def is_map(t):
+    return isinstance(t, tuple) and t[0] == 'Map'
 
 
 def tystr(t):
+    if is_map(t):
+        return f"Map[{tystr(t[1])}, {tystr(t[2])}]"
     if isinstance(t, tuple):
         return f"{t[0]}[{tystr(t[1])}]"
     return t
@@ -205,7 +253,7 @@ class Checker:
                 self.owner_ok(it, it.name, False)
         for it in self.items:
             if it.k in ('Record', 'Enum'):
-                if it.name in SCALARS or it.name in ('List', 'Opt', 'Void', 'Never') or it.name in self.type_nodes:
+                if it.name in SCALARS or it.name in ('List', 'Opt', 'Map', 'Void', 'Never') or it.name in self.type_nodes:
                     self.err('E-NAME', it, f"type name `{it.name}` is already taken")
                     continue
                 self.type_nodes[it.name] = it
@@ -255,6 +303,12 @@ class Checker:
             self.valid_type(t, node)
 
     def valid_type(self, t, node):
+        if is_map(t):
+            if t[1] not in MAP_KEYS:
+                self.err('E-TYPE', node, f"a Map key must be Int or Text, got {tystr(t[1])}",
+                         "key by an Int id or by a Text name (e.g. `show(...)` of the richer value)")
+                return False
+            return self.valid_type(t[2], node)
         if isinstance(t, tuple):
             return self.valid_type(t[1], node)
         if t in SCALARS or t in self.type_nodes:
@@ -520,8 +574,26 @@ class Checker:
         elif k == 'MethodStmt':
             c = s.call
             t = self.lvalue(c.e)
-            if c.name not in ('push', 'pop'):
-                self.err('E-NAME', c, f"unknown method `.{c.name}`", "methods: `.push(x)` and `.pop()` on a `var` List")
+            if c.name not in ('push', 'pop', 'remove') and c.name in FOREIGN_METHOD:
+                alt = FOREIGN_METHOD[c.name]
+                self.err('E-NAME', c, f"Dovod has no method `.{c.name}(...)`",
+                         f"write `{alt}`" if not alt.startswith('`') else f"write {alt}")
+            elif c.name == 'remove' or is_map(t):
+                if c.name != 'remove':
+                    self.err('E-NAME', c, f"a Map has no method `.{c.name}`",
+                             "on a `var` Map: `m[k] = v` sets, `m.remove(k)` removes; read with `get(m, k)` / `m[k]`")
+                elif t != ERR and not is_map(t):
+                    self.err('E-TYPE', c, f"`.remove` needs a Map, got {tystr(t)}",
+                             "for a List build a new one: `slice(xs, 0, i) + slice(xs, i + 1, len(xs))`")
+                elif len(c.args) != 1:
+                    self.err('E-ARGS', c, "`.remove` takes exactly one key")
+                elif t != ERR:
+                    at = self.expr(c.args[0], t[1])
+                    if not same(at, t[1]):
+                        self.mismatch(c.args[0], t[1], at)
+            elif c.name not in ('push', 'pop'):
+                self.err('E-NAME', c, f"unknown method `.{c.name}`",
+                         "methods: `.push(x)` and `.pop()` on a `var` List, `.remove(k)` on a `var` Map")
             elif t != ERR and not (isinstance(t, tuple) and t[0] == 'List'):
                 self.err('E-TYPE', c, f"`.{c.name}` needs a List, got {tystr(t)}")
             elif c.name == 'push':
@@ -560,6 +632,9 @@ class Checker:
             elem = ERR
             if isinstance(t, tuple) and t[0] == 'List':
                 elem = t[1]
+            elif is_map(t):
+                self.err('E-TYPE', s.e, f"`for ... in` needs a List, got {tystr(t)}",
+                         "walk a Map through its keys (sorted): `for k in keys(m) { ... m[k] ... }`")
             elif t != ERR:
                 self.err('E-TYPE', s.e, f"`for ... in` needs a List, got {tystr(t)}",
                          "for numbers use `for i in 0..n`")
@@ -626,6 +701,12 @@ class Checker:
             return e.ty
         if e.k == 'Index':
             bt = self.lvalue(e.e)
+            if is_map(bt):
+                kt = self.expr(e.i, bt[1])
+                if not same(kt, bt[1]):
+                    self.mismatch(e.i, bt[1], kt)
+                e.ty = bt[2]
+                return e.ty
             it = self.expr(e.i, 'Int')
             if not same(it, 'Int'):
                 self.mismatch(e.i, 'Int', it)
@@ -689,6 +770,18 @@ class Checker:
                     self.err('E-TYPE', pat, f"matching {tystr(t)}: arms are `some(name)` and `none`")
             elif pat.k == 'PElse':
                 key = None
+            elif pat.k == 'PVariants':
+                key = None
+                pat.idxs = []
+                for nm in pat.names:
+                    if nm not in self.variants or self.variants[nm][0] != t:
+                        self.err('E-TYPE', pat, f"`{nm}` is not a variant of `{t}`",
+                                 "variants: " + ', '.join(v for v, _ in self.enums[t]))
+                        continue
+                    pat.idxs.append(self.variants[nm][1])
+                    if nm in seen:
+                        self.err('E-MATCH', pat, f"duplicate arm `{nm}`")
+                    seen.append(nm)
             else:
                 key = None
                 if pat.k != 'PVariant' or pat.name not in self.variants or self.variants[pat.name][0] != t:
@@ -809,6 +902,36 @@ class Checker:
                 elif not same(t, elem):
                     self.mismatch(it, elem, t)
             return ERR if elem == ERR else ('List', elem)
+        if k == 'MapLit':
+            kt, vt = (exp[1], exp[2]) if is_map(exp) else (None, None)
+            if not e.entries:
+                if kt is None:
+                    self.err('E-TYPE', e, "cannot tell the key and value types of `{}`",
+                             "annotate: `var m: Map[Text, Int] = {}`")
+                    return ERR
+                return exp
+            seen = set()
+            for ke, ve in e.entries:
+                t1 = self.expr(ke, kt)
+                t2 = self.expr(ve, vt)
+                if kt is None:
+                    kt = t1
+                elif not same(t1, kt):
+                    self.mismatch(ke, kt, t1)
+                if vt is None:
+                    vt = t2
+                elif not same(t2, vt):
+                    self.mismatch(ve, vt, t2)
+                if ke.k in ('Int', 'Str'):
+                    if ke.v in seen:
+                        self.err('E-NAME', ke, f"key {ke.v!r} is given twice in this map")
+                    seen.add(ke.v)
+            if ERR in (kt, vt):
+                return ERR
+            if kt not in MAP_KEYS:
+                self.err('E-TYPE', e.entries[0][0], f"a Map key must be Int or Text, got {tystr(kt)}")
+                return ERR
+            return ('Map', kt, vt)
         if k == 'Name':
             v = self.lookup(e.name)
             if v is not None:
@@ -868,9 +991,17 @@ class Checker:
             return self.field_type(e, self.expr(e.e))
         if k == 'Index':
             bt = self.expr(e.e)
+            if is_map(bt):
+                kt = self.expr(e.i, bt[1])
+                if not same(kt, bt[1]):
+                    self.mismatch(e.i, bt[1], kt)
+                return bt[2]
             it = self.expr(e.i, 'Int')
             if not same(it, 'Int'):
                 self.mismatch(e.i, 'Int', it)
+            if e.i.k == 'Un' and e.i.op == '-' and e.i.e.k == 'Int':
+                self.err('E-TYPE', e.i, "no negative indexes: this would trap at run time",
+                         "the last element is `xs[len(xs) - 1]`")
             if bt == ERR:
                 return ERR
             if isinstance(bt, tuple) and bt[0] == 'List':
@@ -879,8 +1010,15 @@ class Checker:
                      "for Text use `slice(t, i, j)` or `byte(t, i)`" if bt == 'Text' else None)
             return ERR
         if k == 'Method':
-            self.err('E-SYNTAX', e, f"`.{e.name}(...)` is a statement, not a value",
-                     "write it on its own line")
+            if e.name in ('push', 'pop', 'remove'):
+                self.err('E-SYNTAX', e, f"`.{e.name}(...)` is a statement, not a value",
+                         "write it on its own line")
+            else:
+                alt = FOREIGN_METHOD.get(e.name)
+                self.err('E-SYNTAX', e, f"Dovod has no method `.{e.name}(...)`: functions take the value as their first argument",
+                         f"write `{alt}`" if alt and not alt.startswith('`') else (f"write {alt}" if alt else
+                         f"write `{e.name}(value, ...)` if such a function exists (see `dovod spec`)"))
+            self.expr(e.e)
             return ERR
         if k == 'Call':
             return self.call(e, exp, stmt)
@@ -895,7 +1033,10 @@ class Checker:
             e.variant = idx
         else:
             near = self.nearest(e.name, list(self.records) + list(self.variants))
-            self.err('E-NAME', e, f"unknown record or variant `{e.name}`", f"did you mean `{near}`?" if near else None)
+            fix = {'None': "write `none` (an empty Opt)", 'True': "write `true`", 'False': "write `false`",
+                   'Null': "there is no null: an absent value is `none` of an `Opt[T]`",
+                   'Nil': "there is no nil: an absent value is `none` of an `Opt[T]`"}.get(e.name)
+            self.err('E-NAME', e, f"unknown record or variant `{e.name}`", fix or (f"did you mean `{near}`?" if near else None))
             for _, fe in e.fields:
                 self.expr(fe)
             return ERR
@@ -991,13 +1132,7 @@ class Checker:
                 return ERR
             return g.ret
         near = self.nearest(name, list(self.fns) + list(BUILTINS) + list(POLY))
-        fix = f"did you mean `{near}`?" if near else None
-        if name in ('str', 'string', 'to_string', 'repr'):
-            fix = "use `show(x)`"
-        elif name in ('int',):
-            fix = "use `trunc(f)` for Float or `parse_int(t)` for Text"
-        elif name in ('append',):
-            fix = "use the statement `xs.push(x)`"
+        fix = FOREIGN_FN.get(name) or (f"did you mean `{near}`?" if near else None)
         self.err('E-NAME', e, f"unknown function `{name}`", fix)
         for a in e.args:
             self.expr(a)
@@ -1024,7 +1159,8 @@ class Checker:
     def poly(self, e, exp):
         name, a = e.name, e.args
         e.builtin, e.effectful = True, False
-        arity = {'len': 1, 'show': 1, 'slice': 3, 'or_else': 2, 'abs': 1, 'min': 2, 'max': 2}[name]
+        arity = {'len': 1, 'show': 1, 'slice': 3, 'or_else': 2, 'abs': 1, 'min': 2, 'max': 2,
+                 'get': 2, 'has': 2, 'keys': 1, 'values': 1, 'sort': 1}[name]
         if len(a) != arity:
             self.err('E-ARGS', e, f"`{name}` takes {arity} argument(s), got {len(a)}")
             for x in a:
@@ -1044,13 +1180,37 @@ class Checker:
                 self.mismatch(a[1], ot[1], dt)
             return ot[1]
         t = self.expr(a[0], exp if name in ('abs', 'min', 'max') else None)
+        if name in ('get', 'has', 'keys', 'values'):
+            if t != ERR and not is_map(t):
+                self.err('E-TYPE', a[0], f"`{name}` needs a Map, got {tystr(t)}",
+                         "for a List use `xs[i]`; for Text use `find`/`contains`" if name in ('get', 'has') else None)
+                for x in a[1:]:
+                    self.expr(x)
+                return ERR
+            if name in ('get', 'has'):
+                kt = self.expr(a[1], t[1] if t != ERR else None)
+                if t != ERR and not same(kt, t[1]):
+                    self.mismatch(a[1], t[1], kt)
+                if t == ERR:
+                    return ERR if name == 'get' else 'Bool'
+                return ('Opt', t[2]) if name == 'get' else 'Bool'
+            if t == ERR:
+                return ERR
+            return ('List', t[1] if name == 'keys' else t[2])
+        if name == 'sort':
+            if t != ERR and not (isinstance(t, tuple) and t[0] == 'List' and t[1] in ('Int', 'Float', 'Text')):
+                self.err('E-TYPE', a[0], f"`sort` needs a List of Int, Float or Text, got {tystr(t)}",
+                         "to sort records, sort a List[Text] of keys like `show(score) + \"|\" + name`, "
+                         "or use a Map keyed by the sort key (keys(m) come sorted)")
+                return ERR
+            return t
         if name == 'show':
             if t in ('Void', 'Never'):
                 self.err('E-TYPE', a[0], "nothing to show")
             return 'Text'
         if name == 'len':
-            if t != ERR and t != 'Text' and not (isinstance(t, tuple) and t[0] == 'List'):
-                self.err('E-TYPE', a[0], f"`len` needs Text or List, got {tystr(t)}")
+            if t != ERR and t != 'Text' and not (isinstance(t, tuple) and t[0] in ('List', 'Map')):
+                self.err('E-TYPE', a[0], f"`len` needs Text, List or Map, got {tystr(t)}")
             return 'Int'
         if name == 'slice':
             for x in a[1:]:

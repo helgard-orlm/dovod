@@ -46,11 +46,48 @@ KEYWORDS = {
 
 TOK_RE = re.compile(r'''
  (?P<ws>[ \t\r]+)|(?P<com>//[^\n]*)|(?P<nl>\n)|
- (?P<float>\d+\.\d+(?:[eE][+-]?\d+)?)|(?P<int>\d+)|
+ (?P<float>\d+\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)|(?P<int>\d+)|
  (?P<id>[A-Za-z_][A-Za-z0-9_]*)|
  (?P<str>"(?:[^"\\\n]|\\.)*")|(?P<chr>'(?:[^'\\\n]|\\.)')|
  (?P<op>->|=>|==|!=|<=|>=|\.\.|[-+*/%<>=(){}\[\],:.?])
 ''', re.X)
+
+# What authors who think in Python (or C, JS) write, and what Dovod says instead.
+LEX_HINT = {
+    '&&': "Dovod writes `and`", '||': "Dovod writes `or`", '!': "Dovod writes `not x` (and `!=` for unequal)",
+    '&': "no bit operators in the core; `and` for Bool", '|': "no bit operators in the core; `or` for Bool",
+    '#': "comments start with `//`", "'": "Text is written in double quotes: \"abc\" ('a' alone is one byte, an Int)",
+    '^': "no bit operators in the core", '~': "no bit operators in the core", '@': "no decorators",
+    ';': "one statement per line, no `;`", '$': "no `$` in names", '`': "Text is written in double quotes",
+}
+# A statement or item that starts with one of these words is another language talking.
+PY_WORDS = {
+    'def': "a function is `fn name(x: Int) -> Int { ... }` with `ex` examples before the body",
+    'elif': "write `else if cond { ... }`",
+    'lambda': "no closures or lambdas: write a named `fn` with examples",
+    'pass': "an empty block is just `{ }`",
+    'import': "bring in a module with `use NAME` (`dovod modules` lists them) or a file with `use \"other.dv\"`",
+    'from': "bring in a module with `use NAME` or a file with `use \"other.dv\"`",
+    'class': "data is a `record Name { field: Type }` or an `enum`; functions are separate `fn`s",
+    'struct': "data is a `record Name { field: Type }`",
+    'try': "no exceptions: a function that can fail returns `Opt[T]` (or an enum with the error); `trap` stops the program",
+    'except': "no exceptions: return `Opt[T]` or an enum with the error",
+    'raise': "no exceptions: return `Opt[T]`/an error enum, or `trap(\"why\")` for what cannot happen",
+    'throw': "no exceptions: return `Opt[T]`/an error enum, or `trap(\"why\")` for what cannot happen",
+    'assert': "a precondition is `need cond` and a postcondition `give cond` (between the signature and the body)",
+    'del': "remove from a `var` Map with `m.remove(k)`; from a List build a new one with `slice`",
+    'global': "no globals: pass the value in and return the new one",
+    'nonlocal': "no closures: pass the value in and return the new one",
+    'yield': "no generators: build a List and return it",
+    'async': "no async: a module's pull function (`*_next(timeout)`) waits for events",
+    'await': "no async: a module's pull function (`*_next(timeout)`) waits for events",
+    'switch': "use `match value { ... }`",
+    'case': "use `match value { Pattern => { ... } }`",
+    'func': "a function is `fn name(x: Int) -> Int { ... }`", 'function': "a function is `fn name(x: Int) -> Int { ... }`",
+    'loop': "use `while true { ... }` with `break`", 'do': "use `while cond { ... }`",
+    'until': "use `while not cond { ... }`", 'unless': "use `if not cond { ... }`",
+    'foreach': "use `for x in xs { ... }`",
+}
 
 ESC = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\', '"': '"', '0': '\0'}
 
@@ -62,7 +99,8 @@ def lex(src, file):
         m = TOK_RE.match(src, pos)
         col = pos - lstart + 1
         if not m:
-            raise DvError(Diag('E-SYNTAX', file, line, col, f"unexpected character {src[pos]!r}"))
+            raise DvError(Diag('E-SYNTAX', file, line, col, f"unexpected character {src[pos]!r}",
+                               LEX_HINT.get(src[pos:pos + 2]) or LEX_HINT.get(src[pos])))
         kind, val = m.lastgroup, m.group()
         if kind == 'nl':
             if depth == 0 and toks and toks[-1].kind != 'nl':
@@ -166,7 +204,34 @@ class Parser:
         want = repr(val) if val is not None else {'id': 'a lowercase name', 'ty': 'a Capitalized name',
                                                   'str': 'a string literal', 'nl': 'end of line'}.get(kind, kind)
         got = 'end of line' if tok.kind == 'nl' else ('end of file' if tok.kind == 'eof' else repr(tok.val))
-        self.fail(f"expected {want}, found {got}")
+        self.fail(f"expected {want}, found {got}", self.hint(tok, val))
+
+    def hint(self, tok, want=None):
+        """The usual reason for this token being here: habits of other languages."""
+        k, v = tok.kind, tok.val
+        prev = self.t[self.i - 1] if self.i else None
+        if k == 'kw' and v == 'for':
+            return ("no comprehensions or generator expressions (`[x for x in xs]`, `all(... for ...)`): "
+                    "write a `for` loop — usually in a small helper `fn` with its own examples")
+        if k == 'kw' and v == 'if':
+            return "no conditional expression (`a if c else b`): use an `if`/`else` that sets a `var`, or `match c { true => ... false => ... }`"
+        if k == 'kw' and v == 'in':
+            return "no `in` operator: `contains(t, sub)` for Text, `has(m, k)` for a Map, a loop (in a helper fn) for a List"
+        if k == 'op' and v == ':' and want == '{':
+            return "a block is `{ ... }` on the same line, not `:` and indentation"
+        if k == 'op' and v == ':' and want == ']':
+            return "no slice syntax: `slice(xs, from, to)` (works on Text and List)"
+        if k == 'op' and v == ',' and prev is not None and want is None:
+            return "no tuples: return or hold several values in a `record`"
+        if k == 'op' and v == '=' and want is None:
+            return "`=` is a statement (`x = 1`), not an expression; compare with `==`"
+        if k == 'str' and prev is not None and prev.kind == 'id' and prev.val in ('f', 'r', 'b'):
+            return "no f-strings: build Text with `+` and `show(x)`: `\"n = \" + show(n)`"
+        if k == 'id' and v in PY_WORDS:
+            return PY_WORDS[v]
+        if k == 'id' and v in ('is', 'isnot'):
+            return "compare with `==` / `!=`; for an Opt use `match` (some/none)"
+        return None
 
     def skip_nl(self):
         while self.at('nl'):
@@ -186,7 +251,9 @@ class Parser:
             tok = self.peek()
             if tok.kind != 'kw' or tok.val not in ('fn', 'record', 'enum', 'const', 'use', 'module', 'effect',
                                                    'native', 'extern'):
-                self.fail("expected a top-level item: fn, record, enum, const or use")
+                self.fail("expected a top-level item: fn, record, enum, const or use",
+                          PY_WORDS.get(tok.val) if tok.kind == 'id' else
+                          ("statements live inside `fn main() uses io { ... }`" if tok.kind != 'nl' else None))
             items.append(getattr(self, 'p_' + tok.val)())
             self.skip_nl()
         return items
@@ -293,6 +360,13 @@ class Parser:
             inner = self.p_type()
             self.expect('op', ']')
             return (tok.val, inner)
+        if tok.val == 'Map':
+            self.expect('op', '[')
+            kt = self.p_type()
+            self.expect('op', ',')
+            vt = self.p_type()
+            self.expect('op', ']')
+            return ('Map', kt, vt)
         return tok.val
 
     def clause_text(self, start_tok):
@@ -362,6 +436,9 @@ class Parser:
 
     def p_stmt(self):
         tok = self.peek()
+        if tok.kind == 'id' and tok.val in PY_WORDS and tok.val not in ('loop', 'do', 'case') \
+                and not (self.t[self.i + 1].kind == 'op' and self.t[self.i + 1].val in ('(', '=', '.', '[')):
+            self.fail(f"`{tok.val}` is not Dovod", PY_WORDS[tok.val])
         if tok.kind == 'kw':
             v = tok.val
             if v in ('let', 'var'):
@@ -483,6 +560,14 @@ class Parser:
             return Node('PSome', tok, name=name)
         vt = self.expect('ty')
         binds = []
+        if self.at('op', ','):              # `A, B, C => { ... }`: several variants, one arm, no bindings
+            names = [vt.val]
+            while self.accept('op', ','):
+                self.skip_nl()
+                names.append(self.expect('ty').val)
+                if self.at('op', '('):
+                    self.fail("an arm that names several variants cannot bind fields", "give that variant its own arm")
+            return Node('PVariants', vt, names=names)
         if self.accept('op', '('):
             while not self.at('op', ')'):
                 binds.append(self.expect('id').val)
@@ -529,9 +614,18 @@ class Parser:
                 self.fail("comparisons do not chain", "write `a < b and b < c`")
         return e
 
+    def no_compound(self):
+        nt = self.t[self.i + 1]
+        tok = self.peek()
+        if nt.kind == 'op' and nt.val == '=' and nt.pos == tok.pos + 1:
+            self.fail(f"there is no `{tok.val}=`", f"write `x = x {tok.val} y`")
+        if nt.kind == 'op' and nt.val == tok.val and tok.val in '+-' and nt.pos == tok.pos + 1:
+            self.fail(f"there is no `{tok.val}{tok.val}`", f"write `i = i {tok.val} 1`")
+
     def p_add(self):
         e = self.p_mul()
         while self.peek().kind == 'op' and self.peek().val in ('+', '-'):
+            self.no_compound()
             tok = self.next()
             self.skip_nl()
             e = Node('Bin', tok, op=tok.val, l=e, r=self.p_mul())
@@ -540,6 +634,7 @@ class Parser:
     def p_mul(self):
         e = self.p_unary()
         while self.peek().kind == 'op' and self.peek().val in ('*', '/', '%'):
+            self.no_compound()
             tok = self.next()
             self.skip_nl()
             e = Node('Bin', tok, op=tok.val, l=e, r=self.p_unary())
@@ -648,10 +743,23 @@ class Parser:
                     break
             self.expect('op', ']')
             return Node('ListLit', tok, items=items)
+        if k == 'op' and v == '{':
+            entries = []
+            self.skip_nl()
+            while not self.at('op', '}'):
+                ke = self.p_expr()
+                self.expect('op', ':')
+                entries.append((ke, self.p_expr()))
+                if not self.accept('op', ','):
+                    if not self.at('nl') and not self.at('op', '}'):
+                        self.fail("expected ',' or end of line between map entries")
+                self.skip_nl()
+            self.expect('op', '}')
+            return Node('MapLit', tok, entries=entries)
         if k == 'op' and v == '?':
             return Node('Hole', tok, name=self.expect('id').val)
         got = 'end of line' if k == 'nl' else repr(v)
-        self.fail(f"expected an expression, found {got}", tok=tok)
+        self.fail(f"expected an expression, found {got}", self.hint(tok), tok=tok)
 
 
 def parse(src, file):

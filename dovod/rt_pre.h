@@ -162,6 +162,28 @@ static void dv_text_show(dv_buf* b, dv_text t) {
 }
 
 // ---- mutants for the "an example must be able to fail" check
+// ---- Map helpers: hashing and a stable sort of key positions (keys(), values(), show() go in key order)
+static inline uint64_t dv_hash_i64(int64_t x) { uint64_t z = (uint64_t)x + 0x9E3779B97F4A7C15ull; z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull; z = (z ^ (z >> 27)) * 0x94D049BB133111EBull; return z ^ (z >> 31); }
+static inline uint64_t dv_hash_text(dv_text t) { uint64_t h = 1469598103934665603ull; for (int64_t i = 0; i < t.n; i++) { h ^= (unsigned char)t.p[i]; h *= 1099511628211ull; } return h ^ (h >> 29); }
+static int dv_kcmp_i64(const void* k, int64_t a, int64_t b) { const int64_t* x = k; return x[a] < x[b] ? -1 : (x[a] > x[b] ? 1 : 0); }
+static int dv_kcmp_f64(const void* k, int64_t a, int64_t b) { const double* x = k; return x[a] < x[b] ? -1 : (x[a] > x[b] ? 1 : 0); }
+static int dv_text_cmp(dv_text a, dv_text b);
+static int dv_kcmp_text(const void* k, int64_t a, int64_t b) { const dv_text* x = k; return dv_text_cmp(x[a], x[b]); }
+static int64_t* dv_key_order(const void* k, int64_t n, int (*cmp)(const void*, int64_t, int64_t)) {
+    int64_t* p = malloc(sizeof(int64_t) * (size_t)(n ? n : 1)); int64_t* t = malloc(sizeof(int64_t) * (size_t)(n ? n : 1));
+    if (!p || !t) dv_trap("out of memory", "runtime");
+    for (int64_t i = 0; i < n; i++) p[i] = i;
+    for (int64_t w = 1; w < n; w *= 2) {               // bottom-up merge sort: no recursion, no qsort_r portability trouble
+        for (int64_t lo = 0; lo < n; lo += 2 * w) {
+            int64_t mid = lo + w < n ? lo + w : n, hi = lo + 2 * w < n ? lo + 2 * w : n, i = lo, j = mid, o = lo;
+            while (i < mid && j < hi) t[o++] = cmp(k, p[j], p[i]) < 0 ? p[j++] : p[i++];
+            while (i < mid) t[o++] = p[i++];
+            while (j < hi) t[o++] = p[j++];
+        }
+        int64_t* sw = p; p = t; t = sw;
+    }
+    free(t); return p;
+}
 static inline int64_t dv_int_perturb(int64_t a) { return (a == INT64_MAX || a == -1) ? a - 1 : a + 1; }
 static inline double dv_float_perturb(double a) { return a + 1.0; }
 static inline bool dv_bool_perturb(bool a) { return !a; }

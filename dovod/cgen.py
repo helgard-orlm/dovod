@@ -37,9 +37,15 @@ def cstr(s):
 
 
 def mg(t):
+    if isinstance(t, tuple) and t[0] == 'Map':
+        return 'M_' + mg(t[1]) + '_' + mg(t[2])
     if isinstance(t, tuple):
         return ('L_' if t[0] == 'List' else 'O_') + mg(t[1])
     return t
+
+
+def is_map(t):
+    return isinstance(t, tuple) and t[0] == 'Map'
 
 
 def cty(t):
@@ -82,6 +88,12 @@ class CGen:
 
     # -- types
     def reg(self, t):
+        if is_map(t):
+            if t not in self.types:
+                for c in (t[1], t[2], ('Opt', t[2]), ('List', t[1]), ('List', t[2])):
+                    self.reg(c)
+                self.types.append(t)
+            return t
         if isinstance(t, tuple):
             self.reg(t[1])
             if t not in self.types:
@@ -91,7 +103,7 @@ class CGen:
     def heap(self, t):
         if t in self.heap_cache:
             return self.heap_cache[t]
-        if t == 'Text' or (isinstance(t, tuple) and t[0] == 'List'):
+        if t == 'Text' or (isinstance(t, tuple) and t[0] in ('List', 'Map')):
             r = True
         elif isinstance(t, tuple):
             r = self.heap(t[1])
@@ -136,10 +148,14 @@ class CGen:
         for t in self.types:
             if t[0] == 'List':
                 lists.append(f"struct {cty(t)} {{ {cty(t[1])}* p; int64_t n, cap; }};")
+            elif t[0] == 'Map':   # dense entries in insertion order + an open-addressing index (0 empty, -1 removed, i+1)
+                lists.append(f"struct {cty(t)} {{ {cty(t[1])}* k; {cty(t[2])}* v; int64_t* s; int64_t n, cap, ns, used; }};")
         done = set()
 
         def deps(t):
             if isinstance(t, tuple):
+                if t[0] == 'Map':
+                    return []
                 return [t[1]] if (t[0] == 'Opt' and (isinstance(t[1], tuple) or t[1] not in SC)) else []
             fts = [ft for _, ft in ck.records[t]] if t in ck.records else \
                 [ft for _, fs in ck.enums[t] for _, ft in fs]
@@ -147,7 +163,7 @@ class CGen:
                     (not isinstance(ft, tuple) and ft not in SC)]
 
         def emit_struct(t):
-            if t in done or (isinstance(t, tuple) and t[0] == 'List'):
+            if t in done or (isinstance(t, tuple) and t[0] in ('List', 'Map')):
                 return
             done.add(t)
             for d in deps(t):
@@ -206,9 +222,16 @@ class CGen:
                    f"for (int64_t k = 0; k < r.n; k++) r.p[k] = {self.copy(et, 'a.p[i + k]')}; return r;")
                 fn(f"{X} {X}_perturb({X} a)", f"{X} r = {{0}}; for (int64_t i = 0; i < a.n; i++) {X}_push(&r, {pf(self.reg(et))}_perturb(a.p[i])); "
                                                f"{E} z = {{0}}; {X}_push(&r, z); return r;")
+                if et in ('Int', 'Float', 'Text'):
+                    kc = {'Int': 'dv_kcmp_i64', 'Float': 'dv_kcmp_f64', 'Text': 'dv_kcmp_text'}[et]
+                    fn(f"{X} {X}_sort({X} a)",
+                       f"int64_t* o = dv_key_order(a.p, a.n, {kc}); {X} r = {{0}}; "
+                       f"for (int64_t i = 0; i < a.n; i++) {X}_push(&r, {self.copy(et, 'a.p[o[i]]')}); free(o); return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)",
                    f"dv_buf_puts(b, \"[\"); for (int64_t i = 0; i < a.n; i++) {{ if (i) dv_buf_puts(b, \", \"); "
                    f"{self.show(et, 'b', 'a.p[i]')} }} dv_buf_puts(b, \"]\");")
+            elif is_map(t):
+                self.gen_map(t, fn)
             elif isinstance(t, tuple):
                 et = t[1]
                 if h:
@@ -271,6 +294,70 @@ class CGen:
                 fn(f"{X} {X}_perturb({X} a)", f"{X} r = {{0}}; switch (a.tag) {{ {' '.join(pts)} default: break; }} return r;")
                 fn(f"void {X}_show(dv_buf* b, {X} a)", f"switch (a.tag) {{ {' '.join(shs)} default: break; }}")
         return fw + lists + structs + protos + bodies
+
+    def gen_map(self, t, fn):
+        X, kt, vt = cty(t), t[1], t[2]
+        K, V = cty(kt), cty(vt)
+        OV, LK, LV = cty(('Opt', vt)), cty(('List', kt)), cty(('List', vt))
+        if kt == 'Int':
+            H, KEQ, KCMP, KFREE, KCOPY = 'dv_hash_i64({})', '({} == {})', 'dv_kcmp_i64', '', '{}'
+        else:
+            H, KEQ, KCMP, KFREE, KCOPY = 'dv_hash_text({})', 'dv_text_eq({}, {})', 'dv_kcmp_text', 'dv_text_free({});', 'dv_text_copy({})'
+        vfree = lambda x: self.free(vt, x)
+        fn(f"int64_t {X}_slot(const {X}* m, {K} key, int64_t* idx)",
+           f"*idx = -1; if (!m->ns) return -1; int64_t mask = m->ns - 1, i = (int64_t)({H.format('key')} & (uint64_t)mask), tomb = -1; "
+           f"for (;;) {{ int64_t e = m->s[i]; if (e == 0) return tomb >= 0 ? tomb : i; "
+           f"if (e == -1) {{ if (tomb < 0) tomb = i; }} else if ({KEQ.format('m->k[e - 1]', 'key')}) {{ *idx = e - 1; return i; }} "
+           f"i = (i + 1) & mask; }}")
+        fn(f"void {X}_rehash({X}* m, int64_t ns)",
+           f"free(m->s); m->s = calloc((size_t)ns, sizeof(int64_t)); if (!m->s) dv_trap(\"out of memory\", \"runtime\"); "
+           f"m->ns = ns; m->used = m->n; for (int64_t j = 0; j < m->n; j++) {{ int64_t i = (int64_t)({H.format('m->k[j]')} & (uint64_t)(ns - 1)); "
+           f"while (m->s[i]) i = (i + 1) & (ns - 1); m->s[i] = j + 1; }}")
+        fn(f"void {X}_set({X}* m, {K} key, {V} val)",   # takes ownership of key and val
+           f"if ((m->used + 1) * 4 >= m->ns * 3) {{ int64_t ns = 8; while (ns * 3 <= (m->n + 1) * 8) ns *= 2; {X}_rehash(m, ns); }} "
+           f"int64_t idx, sl = {X}_slot(m, key, &idx); "
+           f"if (idx >= 0) {{ {vfree('m->v[idx]')} m->v[idx] = val; {KFREE.format('key')} return; }} "
+           f"if (m->n == m->cap) {{ m->cap = m->cap ? m->cap * 2 : 4; m->k = realloc(m->k, sizeof({K}) * (size_t)m->cap); "
+           f"m->v = realloc(m->v, sizeof({V}) * (size_t)m->cap); if (!m->k || !m->v) dv_trap(\"out of memory\", \"runtime\"); }} "
+           f"m->k[m->n] = key; m->v[m->n] = val; if (m->s[sl] == 0) m->used++; m->s[sl] = m->n + 1; m->n++;")
+        fn(f"void {X}_remove({X}* m, {K} key)",
+           f"int64_t idx, sl = {X}_slot(m, key, &idx); if (idx < 0) return; int64_t last = m->n - 1, j2, sl2 = sl; "
+           f"if (idx != last) sl2 = {X}_slot(m, m->k[last], &j2); "
+           f"{KFREE.format('m->k[idx]')} {vfree('m->v[idx]')} m->s[sl] = -1; "
+           f"if (idx != last) {{ m->k[idx] = m->k[last]; m->v[idx] = m->v[last]; m->s[sl2] = idx + 1; }} m->n--;")
+        fn(f"void {X}_keytrap({K} key, const char* loc)",
+           f"dv_buf b = {{0}}; dv_buf_puts(&b, \"key not in the map: \"); {self.show(kt, '&b', 'key')} "
+           f"dv_text t = dv_buf_take(&b); dv_trap_text(t, loc);")
+        fn(f"{V}* {X}_at({X}* m, {K} key, const char* loc)",
+           f"int64_t idx; {X}_slot(m, key, &idx); if (idx < 0) {X}_keytrap(key, loc); return &m->v[idx];")
+        fn(f"{V} {X}_get({X} m, {K} key, const char* loc)",
+           f"int64_t idx; {X}_slot(&m, key, &idx); if (idx < 0) {X}_keytrap(key, loc); return m.v[idx];")
+        fn(f"{OV} {X}_opt({X} m, {K} key)",
+           f"{OV} r = {{0}}; int64_t idx; {X}_slot(&m, key, &idx); if (idx >= 0) {{ r.has = true; r.v = {self.copy(vt, 'm.v[idx]')}; }} return r;")
+        fn(f"bool {X}_has({X} m, {K} key)", f"int64_t idx; {X}_slot(&m, key, &idx); return idx >= 0;")
+        fn(f"{X} {X}_copy({X} a)",
+           f"{X} r = a; if (!a.n && !a.ns) return r; r.cap = a.n ? a.n : 1; r.k = dv_alloc(sizeof({K}) * (size_t)r.cap); "
+           f"r.v = dv_alloc(sizeof({V}) * (size_t)r.cap); for (int64_t i = 0; i < a.n; i++) {{ r.k[i] = {KCOPY.format('a.k[i]')}; "
+           f"r.v[i] = {self.copy(vt, 'a.v[i]')}; }} r.s = dv_alloc(sizeof(int64_t) * (size_t)a.ns); "
+           f"memcpy(r.s, a.s, sizeof(int64_t) * (size_t)a.ns); return r;")
+        fn(f"void {X}_free({X} a)",
+           f"for (int64_t i = 0; i < a.n; i++) {{ {KFREE.format('a.k[i]')} {vfree('a.v[i]')} }} free(a.k); free(a.v); free(a.s);")
+        fn(f"bool {X}_eq({X} a, {X} b)",
+           f"if (a.n != b.n) return false; for (int64_t i = 0; i < a.n; i++) {{ int64_t j; {X}_slot(&b, a.k[i], &j); "
+           f"if (j < 0 || !{self.eq(vt, 'a.v[i]', 'b.v[j]')}) return false; }} return true;")
+        fn(f"{LK} {X}_keys({X} a)",
+           f"int64_t* o = dv_key_order(a.k, a.n, {KCMP}); {LK} r = {{0}}; "
+           f"for (int64_t i = 0; i < a.n; i++) {LK}_push(&r, {KCOPY.format('a.k[o[i]]')}); free(o); return r;")
+        fn(f"{LV} {X}_values({X} a)",
+           f"int64_t* o = dv_key_order(a.k, a.n, {KCMP}); {LV} r = {{0}}; "
+           f"for (int64_t i = 0; i < a.n; i++) {LV}_push(&r, {self.copy(vt, 'a.v[o[i]]')}); free(o); return r;")
+        fn(f"{X} {X}_perturb({X} a)",
+           f"{X} r = {{0}}; if (!a.n) {{ {K} zk = {{0}}; {V} zv = {{0}}; {X}_set(&r, zk, zv); return r; }} "
+           f"for (int64_t i = 0; i < a.n; i++) {X}_set(&r, {KCOPY.format('a.k[i]')}, {pf(self.reg(vt))}_perturb(a.v[i])); return r;")
+        fn(f"void {X}_show(dv_buf* b, {X} a)",
+           f"int64_t* o = dv_key_order(a.k, a.n, {KCMP}); dv_buf_puts(b, \"{{\"); for (int64_t i = 0; i < a.n; i++) {{ "
+           f"if (i) dv_buf_puts(b, \", \"); {self.show(kt, 'b', 'a.k[o[i]]')} dv_buf_puts(b, \": \"); "
+           f"{self.show(vt, 'b', 'a.v[o[i]]')} }} dv_buf_puts(b, \"}}\"); free(o);")
 
     # -- emission plumbing
     def emit(self, s):
@@ -367,6 +454,14 @@ class CGen:
             x = self.plain(t)
             for it in e.items:
                 self.emit(f"{cty(t)}_push(&{x}, {self.val(it, sink=True)});")
+            return x, True
+        if k == 'MapLit':
+            if not e.entries:
+                return f"(({self.cty(t)}){{0}})", True
+            x = self.plain(t)
+            for ke, ve in e.entries:
+                kv = self.plain(t[1], self.val(ke, sink=True))
+                self.emit(f"{cty(t)}_set(&{x}, {kv}, {self.val(ve, sink=True)});")
             return x, True
         if k == 'Ctor':
             fs = ', '.join(f".f_{n} = {self.val(fe, sink=True)}" for n, fe in e.fields)
@@ -476,6 +571,10 @@ class CGen:
         t0 = e.args[0].ty
         if n == 'len':
             return f"({a[0]}).n"
+        if n == 'sort':
+            return f"{self.cty(t0)}_sort({a[0]})"
+        if n in ('get', 'has', 'keys', 'values'):
+            return f"{self.cty(t0)}_{'opt' if n == 'get' else n}({', '.join(a)})"
         if n == 'show':
             b = self.name('b')
             self.decl(f"dv_buf {b} = {{0}};")
@@ -533,6 +632,13 @@ class CGen:
                 self.emit(f"if (dv_bm != {self.newmut(s, 'this assignment is removed')}) {{")
             t = s.target.ty
             nv = self.plain(t, self.val(s.e, sink=True))
+            if s.target.k == 'Index' and is_map(s.target.e.ty):
+                mt = s.target.e.ty
+                kv = self.plain(mt[1], self.val(s.target.i, sink=True))
+                self.emit(f"{cty(mt)}_set(&{self.lv(s.target.e)}, {kv}, {nv});")
+                if self.mut_on:
+                    self.emit("}")
+                return
             lv = self.lv(s.target)
             if s.target.k == 'Name':
                 self.emit(self.free(t, lv))
@@ -552,6 +658,8 @@ class CGen:
             if c.name == 'push':
                 v = self.plain(c.e.ty[1], self.val(c.args[0], sink=True))
                 self.emit(f"{X}_push(&{self.lv(c.e)}, {v});")
+            elif c.name == 'remove':
+                self.emit(f"{X}_remove(&{self.lv(c.e)}, {self.val(c.args[0])});")
             else:
                 self.emit(f"{X}_pop(&{self.lv(c.e)}, {self.loc(c)});")
             if self.mut_on:
@@ -613,6 +721,8 @@ class CGen:
                     cond = ' || '.join(self.eq(t, m, self.g(lit)[0]) for lit in pat.lits)
                 elif pat.k == 'PNone':
                     cond = f"!{m}.has"
+                elif pat.k == 'PVariants':
+                    cond = ' || '.join(f"{m}.tag == {i}" for i in pat.idxs) or '0'
                 else:
                     cond = f"{m}.tag == {pat.idx}"
                     fts = dict(self.ck.variants[pat.name][2])

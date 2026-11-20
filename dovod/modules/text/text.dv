@@ -1,0 +1,485 @@
+// Module `text`: Text as letters, not bytes. Pure Dovod — every function here carries examples, nothing
+// is taken on faith. The core counts bytes (`len`, `slice`, `byte`); this module counts characters
+// (Unicode code points, decoded from UTF-8), so "ёж" is 2 letters here and 4 bytes in the core.
+//
+//   use text
+//   text_len("ёж") == 2            text_chars("ёж") == ["ё", "ж"]
+//   text_upper("Привет, world") == "ПРИВЕТ, WORLD"
+//   text_fixed(3.14159, 2) == "3.14"         text_group(1234567, " ") == "1 234 567"
+//   text_pad_left("7", 3, "0") == "007"      text_words(" a  b\n") == ["a", "b"]
+//
+// Case mapping covers ASCII, Latin-1 letters and Cyrillic (Russian, Ukrainian, Belarusian...); other
+// scripts are returned unchanged. Bytes that are not valid UTF-8 read as one character each, U+FFFD.
+module text
+
+const text_bad: Int = 65533      // U+FFFD, what an invalid byte reads as
+
+// how many bytes the UTF-8 character starting at byte `i` takes (1 for an invalid byte)
+fn text_width_at(t: Text, i: Int) -> Int
+  need i >= 0 and i < len(t)
+  ex text_width_at("a", 0) == 1
+  ex text_width_at("ё", 0) == 2
+  ex text_width_at("€", 0) == 3
+  ex text_width_at("😀", 0) == 4
+  ex text_width_at("ё", 1) == 1              // a continuation byte alone is invalid: one byte
+  ex text_width_at(slice("€", 0, 2), 0) == 1 // cut short: invalid
+  ex text_width_at("a" + from_byte(128), 0) == 1
+  ex text_width_at(from_byte(191) + from_byte(128), 0) == 1
+  ex text_width_at(from_byte(192) + from_byte(128), 0) == 2
+  ex text_width_at(from_byte(223) + from_byte(191), 0) == 2
+  ex text_width_at(from_byte(208) + "a", 0) == 1
+  ex text_width_at(from_byte(208) + from_byte(192), 0) == 1
+  ex text_width_at(from_byte(224) + from_byte(160) + from_byte(128), 0) == 3
+  ex text_width_at(from_byte(239) + from_byte(191) + from_byte(191), 0) == 3
+  ex text_width_at(from_byte(226) + "a" + from_byte(128), 0) == 1
+  ex text_width_at(from_byte(240) + from_byte(144) + from_byte(128) + from_byte(128), 0) == 4
+  ex text_width_at(from_byte(247) + from_byte(128) + from_byte(128) + from_byte(128), 0) == 4
+  ex text_width_at(from_byte(248) + from_byte(128) + from_byte(128) + from_byte(128), 0) == 1
+{
+  let b = byte(t, i)
+  var w = 1
+  if b >= 240 and b < 248 {
+    w = 4
+  } else if b >= 224 and b < 240 {
+    w = 3
+  } else if b >= 192 and b < 224 {
+    w = 2
+  }
+  if i + w > len(t) {
+    return 1
+  }
+  for j in 1..w {
+    let c = byte(t, i + j)
+    if c < 128 or c >= 192 {
+      return 1
+    }
+  }
+  return w
+}
+
+// the code point of the character starting at byte `i`
+fn text_code_at(t: Text, i: Int) -> Int
+  need i >= 0 and i < len(t)
+  ex text_code_at("A", 0) == 65
+  ex text_code_at("ё", 0) == 1105
+  ex text_code_at("€", 0) == 8364
+  ex text_code_at("😀", 0) == 128512
+  ex text_code_at("ё", 1) == 65533
+  ex text_code_at(from_byte(128), 0) == 65533
+  ex text_code_at("\x7f", 0) == 127
+{
+  let w = text_width_at(t, i)
+  let b = byte(t, i)
+  if w == 1 {
+    if b >= 128 {
+      return text_bad
+    }
+    return b
+  }
+  var c = b % 32                 // a 2- or 3-byte lead keeps its low 5 bits (a 3-byte lead's 5th bit is 0)
+  if w == 4 {
+    c = b % 8
+  }
+  for j in 1..w {
+    c = c * 64 + byte(t, i + j) % 64
+  }
+  return c
+}
+
+// the code points of the whole text
+fn text_codes(t: Text) -> List[Int]
+  ex text_codes("Aё€") == [65, 1105, 8364]
+  ex text_codes("") == []
+{
+  var out: List[Int] = []
+  var i = 0
+  while i < len(t) {
+    out.push(text_code_at(t, i))
+    i = i + text_width_at(t, i)
+  }
+  return out
+}
+
+// one code point as UTF-8 Text
+fn text_from_code(c: Int) -> Text
+  need c >= 0 and c <= 1114111
+  ex text_from_code(65) == "A"
+  ex text_from_code(1105) == "ё"
+  ex text_from_code(8364) == "€"
+  ex text_from_code(128512) == "😀"
+  ex text_from_code(127) == "\x7f"
+  ex text_from_code(128) == from_byte(194) + from_byte(128)
+  ex text_from_code(2047) == from_byte(223) + from_byte(191)
+  ex text_from_code(2048) == from_byte(224) + from_byte(160) + from_byte(128)
+  ex text_from_code(65535) == from_byte(239) + from_byte(191) + from_byte(191)
+  ex text_from_code(65536) == from_byte(240) + from_byte(144) + from_byte(128) + from_byte(128)
+  ex text_from_code(4096) == from_byte(225) + from_byte(128) + from_byte(128)
+  ex text_from_code(262144) == from_byte(241) + from_byte(128) + from_byte(128) + from_byte(128)
+  ex text_from_code(1114111) == from_byte(244) + from_byte(143) + from_byte(191) + from_byte(191)
+{
+  if c < 128 {
+    return from_byte(c)
+  }
+  if c < 2048 {
+    return from_byte(192 + c / 64) + from_byte(128 + c % 64)
+  }
+  if c < 65536 {
+    return from_byte(224 + c / 4096) + from_byte(128 + c / 64 % 64) + from_byte(128 + c % 64)
+  }
+  return from_byte(240 + c / 262144) + from_byte(128 + c / 4096 % 64) + from_byte(128 + c / 64 % 64) + from_byte(128 + c % 64)
+}
+
+fn text_from_codes(cs: List[Int]) -> Text
+  ex text_from_codes([1105, 1078]) == "ёж"
+  ex text_from_codes([]) == ""
+{
+  var parts: List[Text] = []
+  for c in cs {
+    parts.push(text_from_code(c))
+  }
+  return join(parts, "")
+}
+
+// the characters, each as its own Text
+fn text_chars(t: Text) -> List[Text]
+  ex text_chars("ёж!") == ["ё", "ж", "!"]
+  ex text_chars("") == []
+{
+  var out: List[Text] = []
+  var i = 0
+  while i < len(t) {
+    let w = text_width_at(t, i)
+    out.push(slice(t, i, i + w))
+    i = i + w
+  }
+  return out
+}
+
+// number of characters (not bytes)
+fn text_len(t: Text) -> Int
+  ex text_len("ёж") == 2
+  ex text_len("abc") == 3
+  ex text_len("") == 0
+  ex text_len("😀!") == 2
+{
+  var n = 0
+  var i = 0
+  while i < len(t) {
+    i = i + text_width_at(t, i)
+    n = n + 1
+  }
+  return n
+}
+
+// characters from..to-1, counted in characters (traps like `slice` when out of range)
+fn text_sub(t: Text, from: Int, to: Int) -> Text
+  ex text_sub("привет", 1, 3) == "ри"
+  ex text_sub("abc", 0, 3) == "abc"
+  ex text_sub("abc", 3, 3) == ""
+{
+  let cs = text_chars(t)
+  return join(slice(cs, from, to), "")
+}
+
+// the same characters in reverse order
+fn text_reverse(t: Text) -> Text
+  ex text_reverse("ёжик") == "кижё"
+  ex text_reverse("") == ""
+{
+  let cs = text_chars(t)
+  let n = len(cs)
+  var out: List[Text] = []
+  for j in 0..n {
+    out.push(cs[n - 1 - j])
+  }
+  return join(out, "")
+}
+
+fn text_upper_code(c: Int) -> Int
+  ex text_upper_code('a') == 'A'
+  ex text_upper_code('z') == 'Z'
+  ex text_upper_code('A') == 'A'
+  ex text_upper_code('{') == '{'
+  ex text_upper_code('`') == '`'
+  ex text_upper_code(1072) == 1040            // а → А
+  ex text_upper_code(1103) == 1071            // я → Я
+  ex text_upper_code(1104) == 1024            // ѐ → Ѐ
+  ex text_upper_code(1105) == 1025            // ё → Ё
+  ex text_upper_code(1119) == 1039            // џ → Џ
+  ex text_upper_code(1169) == 1168            // ґ → Ґ
+  ex text_upper_code(224) == 192              // à → À
+  ex text_upper_code(254) == 222              // þ → Þ
+  ex text_upper_code(247) == 247              // ÷ stays
+  ex text_upper_code(255) == 255              // ÿ stays (its capital is outside Latin-1)
+  ex text_upper_code(1071) == 1071
+  ex text_upper_code(1120) == 1120
+  ex text_upper_code(1170) == 1170
+{
+  if c >= 'a' and c <= 'z' {
+    return c - 32
+  }
+  if c >= 224 and c <= 254 and c != 247 {
+    return c - 32
+  }
+  if c >= 1072 and c <= 1103 {
+    return c - 32
+  }
+  if c >= 1104 and c <= 1119 {
+    return c - 80
+  }
+  if c == 1169 {
+    return 1168
+  }
+  return c
+}
+
+fn text_lower_code(c: Int) -> Int
+  ex text_lower_code('A') == 'a'
+  ex text_lower_code('Z') == 'z'
+  ex text_lower_code('@') == '@'
+  ex text_lower_code('[') == '['
+  ex text_lower_code(1040) == 1072            // А → а
+  ex text_lower_code(1071) == 1103            // Я → я
+  ex text_lower_code(1024) == 1104
+  ex text_lower_code(1025) == 1105            // Ё → ё
+  ex text_lower_code(1039) == 1119
+  ex text_lower_code(1168) == 1169            // Ґ → ґ
+  ex text_lower_code(192) == 224
+  ex text_lower_code(222) == 254
+  ex text_lower_code(215) == 215              // × stays
+  ex text_lower_code(223) == 223              // ß stays
+  ex text_lower_code(1023) == 1023
+  ex text_lower_code(1072) == 1072
+  ex text_lower_code(1167) == 1167
+{
+  if c >= 'A' and c <= 'Z' {
+    return c + 32
+  }
+  if c >= 192 and c <= 222 and c != 215 {
+    return c + 32
+  }
+  if c >= 1040 and c <= 1071 {
+    return c + 32
+  }
+  if c >= 1024 and c <= 1039 {
+    return c + 80
+  }
+  if c == 1168 {
+    return 1169
+  }
+  return c
+}
+
+fn text_upper(t: Text) -> Text
+  ex text_upper("Привет, world! ёЁ ґ") == "ПРИВЕТ, WORLD! ЁЁ Ґ"
+  ex text_upper("") == ""
+{
+  var cs: List[Int] = []
+  for c in text_codes(t) {
+    cs.push(text_upper_code(c))
+  }
+  return text_from_codes(cs)
+}
+
+fn text_lower(t: Text) -> Text
+  ex text_lower("ПРИВЕТ, World! Ё Ї") == "привет, world! ё ї"
+  ex text_lower("") == ""
+{
+  var cs: List[Int] = []
+  for c in text_codes(t) {
+    cs.push(text_lower_code(c))
+  }
+  return text_from_codes(cs)
+}
+
+// is this code point a letter (ASCII, Latin-1, Cyrillic)?
+fn text_is_letter(c: Int) -> Bool
+  ex text_is_letter('a') == true
+  ex text_is_letter('Z') == true
+  ex text_is_letter('5') == false
+  ex text_is_letter(1078) == true             // ж
+  ex text_is_letter(1169) == true             // ґ
+  ex text_is_letter(215) == false             // ×
+  ex text_is_letter(247) == false             // ÷
+  ex text_is_letter(192) == true
+  ex text_is_letter(255) == true
+  ex text_is_letter(223) == true              // ß
+  ex text_is_letter(191) == false
+  ex text_is_letter(1023) == false
+  ex text_is_letter(1024) == true
+  ex text_is_letter(1119) == true
+  ex text_is_letter(1120) == false
+  ex text_is_letter(1168) == true
+  ex text_is_letter(1170) == false
+  ex text_is_letter('@') == false
+  ex text_is_letter('[') == false
+  ex text_is_letter('`') == false
+  ex text_is_letter('{') == false
+{
+  if text_lower_code(c) != c or text_upper_code(c) != c {
+    return true
+  }
+  return c == 223 or c == 255     // ß and ÿ have no Latin-1 pair
+}
+
+fn text_is_digit(c: Int) -> Bool
+  ex text_is_digit('0') == true
+  ex text_is_digit('9') == true
+  ex text_is_digit('/') == false
+  ex text_is_digit(':') == false
+{
+  return c >= '0' and c <= '9'
+}
+
+fn text_is_space(c: Int) -> Bool
+  ex text_is_space(' ') == true
+  ex text_is_space('\n') == true
+  ex text_is_space('\t') == true
+  ex text_is_space('\r') == true
+  ex text_is_space(160) == true               // no-break space
+  ex text_is_space('x') == false
+{
+  return c == ' ' or c == '\n' or c == '\t' or c == '\r' or c == 160
+}
+
+// words: runs of non-space characters
+fn text_words(t: Text) -> List[Text]
+  ex text_words("  a  bb\nccc\t") == ["a", "bb", "ccc"]
+  ex text_words("") == []
+  ex text_words("one") == ["one"]
+{
+  var out: List[Text] = []
+  var cur = ""
+  for ch in text_chars(t) {
+    if text_is_space(text_code_at(ch, 0)) {
+      if cur != "" {
+        out.push(cur)
+        cur = ""
+      }
+    } else {
+      cur = cur + ch
+    }
+  }
+  if cur != "" {
+    out.push(cur)
+  }
+  return out
+}
+
+// lines without their ends; "\r\n" counts as one end; a final end does not add an empty line
+fn text_lines(t: Text) -> List[Text]
+  ex text_lines("a\nb\r\nc") == ["a", "b", "c"]
+  ex text_lines("a\n") == ["a"]
+  ex text_lines("a\n\nb") == ["a", "", "b"]
+  ex text_lines("") == []
+  ex text_lines("\n") == [""]
+{
+  if t == "" {
+    return []
+  }
+  var parts = split(replace(t, "\r\n", "\n"), "\n")
+  if parts[len(parts) - 1] == "" {
+    parts.pop()
+  }
+  return parts
+}
+
+fn text_repeat(t: Text, n: Int) -> Text
+  need n >= 0
+  ex text_repeat("ab", 3) == "ababab"
+  ex text_repeat("x", 0) == ""
+{
+  var parts: List[Text] = []
+  for _i in 0..n {
+    parts.push(t)
+  }
+  return join(parts, "")
+}
+
+// pad on the left with `fill` (one character) up to `width` characters; longer text stays as is
+fn text_pad_left(t: Text, width: Int, fill: Text) -> Text
+  need text_len(fill) == 1
+  ex text_pad_left("7", 3, "0") == "007"
+  ex text_pad_left("ёж", 4, "·") == "··ёж"
+  ex text_pad_left("12345", 3, " ") == "12345"
+  ex text_pad_left("123", 3, " ") == "123"
+{
+  let n = text_len(t)
+  if n >= width {
+    return t
+  }
+  return text_repeat(fill, width - n) + t
+}
+
+fn text_pad_right(t: Text, width: Int, fill: Text) -> Text
+  need text_len(fill) == 1
+  ex text_pad_right("ab", 4, ".") == "ab.."
+  ex text_pad_right("abcd", 2, ".") == "abcd"
+  ex text_pad_right("ab", 2, ".") == "ab"
+{
+  let n = text_len(t)
+  if n >= width {
+    return t
+  }
+  return t + text_repeat(fill, width - n)
+}
+
+// an Int with groups of three digits: 1234567 → "1 234 567" (sep " "), "1,234,567" (sep ",")
+fn text_group(n: Int, sep: Text) -> Text
+  ex text_group(1234567, " ") == "1 234 567"
+  ex text_group(-1234, ",") == "-1,234"
+  ex text_group(999, " ") == "999"
+  ex text_group(1000, " ") == "1 000"
+  ex text_group(0, " ") == "0"
+{
+  var digits = show(n)
+  var sign = ""
+  if n < 0 {
+    sign = "-"
+    digits = slice(digits, 1, len(digits))
+  }
+  var groups: List[Text] = []
+  var end = len(digits)
+  while end > 3 {
+    groups.push(slice(digits, end - 3, end))
+    end = end - 3
+  }
+  groups.push(slice(digits, 0, end))
+  var out: List[Text] = []
+  let g = len(groups)
+  for j in 0..g {
+    out.push(groups[g - 1 - j])
+  }
+  return sign + join(out, sep)
+}
+
+// a Float with exactly `digits` digits after the point, rounded half away from zero
+fn text_fixed(x: Float, digits: Int) -> Text
+  need digits >= 0 and digits <= 9
+  need abs(x) < 1000000000.0
+  ex text_fixed(3.14159, 2) == "3.14"
+  ex text_fixed(2.5, 0) == "3"
+  ex text_fixed(-2.5, 0) == "-3"
+  ex text_fixed(0.125, 2) == "0.13"
+  ex text_fixed(-0.001, 2) == "0.00"
+  ex text_fixed(1.0, 3) == "1.000"
+  ex text_fixed(0.05, 1) == "0.1"
+  ex text_fixed(99.996, 2) == "100.00"
+  ex text_fixed(7.0, 1) == "7.0"
+{
+  var scale = 1
+  for _i in 0..digits {
+    scale = scale * 10
+  }
+  let v = trunc(abs(x) * float(scale) + 0.5 + 0.0000001)
+  let whole = v / scale
+  let frac = v % scale
+  var sign = ""
+  if x < 0.0 and v != 0 {
+    sign = "-"
+  }
+  if digits == 0 {
+    return sign + show(whole)
+  }
+  return sign + show(whole) + "." + text_pad_left(show(frac), digits, "0")
+}

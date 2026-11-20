@@ -1,0 +1,15 @@
+// read a JSON file, write it back compact: compared with Python's json in tests/run.sh
+use json
+
+fn main() uses io, env, fs_read {
+  let a = args()
+  match read_file(a[0]) {
+    some(raw) => {
+      match json_parse(raw) {
+        some(j) => { print(json_show(j)) }
+        none => { print("ERROR " + json_error(raw)) }
+      }
+    }
+    none => { print("ERROR cannot read " + a[0]) }
+  }
+}

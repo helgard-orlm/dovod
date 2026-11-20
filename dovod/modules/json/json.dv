@@ -1,0 +1,806 @@
+// Module `json`: read and write JSON. Pure Dovod — every function carries examples, nothing is native.
+//
+//   use json
+//   match json_parse("{\"name\": \"Ёж\", \"tags\": [1, 2]}") {
+//     some(j) => { ... json_text_at(j, "name") ... json_path(j, "tags.1") ... }
+//     none => { ... json_error(raw) says what is wrong and where ... }
+//   }
+//   json_show(JsonObj(fields: [JsonField(key: "ok", val: JsonBool(b: true))])) == "{\"ok\":true}"
+//
+// A JSON value is the enum `Json`. Objects keep their keys in the order they were written (a List of
+// JsonField, not a Map), so reading and writing a file does not reorder it. Numbers are Float (as in
+// JavaScript); `json_int` gives an Int when the number is whole. Nesting deeper than 500 levels is refused.
+module json
+use text
+
+enum Json {
+  JsonNull
+  JsonBool(b: Bool)
+  JsonNum(n: Float)
+  JsonText(t: Text)
+  JsonList(items: List[Json])
+  JsonObj(fields: List[JsonField])
+}
+
+record JsonField { key: Text, val: Json }
+
+// one step of the parser: the value read, where reading stopped, or what went wrong
+record JsonStep { val: Json, at: Int, err: Text }
+
+const json_max_depth: Int = 500
+
+fn json_skip_ws(t: Text, i: Int) -> Int
+  ex json_skip_ws("  \n\t\rx", 0) == 5
+  ex json_skip_ws("x", 0) == 0
+  ex json_skip_ws("", 0) == 0
+  ex json_skip_ws(" ", 0) == 1
+{
+  var j = i
+  while j < len(t) {
+    let c = byte(t, j)
+    if c != ' ' and c != '\n' and c != '\t' and c != '\r' {
+      return j
+    }
+    j = j + 1
+  }
+  return j
+}
+
+fn json_fail(msg: Text, at: Int) -> JsonStep
+  ex json_fail("bad", 3) == JsonStep(val: JsonNull, at: 3, err: "bad")
+{
+  return JsonStep(val: JsonNull, at: at, err: msg)
+}
+
+fn json_hex(c: Int) -> Int
+  ex json_hex('0') == 0
+  ex json_hex('9') == 9
+  ex json_hex('a') == 10
+  ex json_hex('F') == 15
+  ex json_hex('f') == 15
+  ex json_hex('A') == 10
+  ex json_hex('g') == -1
+  ex json_hex('G') == -1
+  ex json_hex('/') == -1
+  ex json_hex(':') == -1
+  ex json_hex('`') == -1
+  ex json_hex('@') == -1
+{
+  if c >= '0' and c <= '9' {
+    return c - '0'
+  }
+  if c >= 'a' and c <= 'f' {
+    return c - 'a' + 10
+  }
+  if c >= 'A' and c <= 'F' {
+    return c - 'A' + 10
+  }
+  return -1
+}
+
+// four hex digits at i, or -1
+fn json_hex4(t: Text, i: Int) -> Int
+  ex json_hex4("00e9", 0) == 233
+  ex json_hex4("x00e9", 1) == 233
+  ex json_hex4("FFFF", 0) == 65535
+  ex json_hex4("12g4", 0) == -1
+  ex json_hex4("123", 0) == -1
+{
+  if i + 4 > len(t) {
+    return -1
+  }
+  var v = 0
+  for k in 0..4 {
+    let h = json_hex(byte(t, i + k))
+    if h < 0 {
+      return -1
+    }
+    v = v * 16 + h
+  }
+  return v
+}
+
+// a string starting at the quote at i
+fn json_read_text(t: Text, i: Int) -> JsonStep
+  need i < len(t) and byte(t, i) == '"'
+  ex json_read_text("\"ab\"", 0) == JsonStep(val: JsonText(t: "ab"), at: 4, err: "")
+  ex json_read_text("\"a\\nb\\\"\\\\\\/\"", 0) == JsonStep(val: JsonText(t: "a\nb\"\\/"), at: 12, err: "")
+  ex json_read_text("\"\\b\\f\\r\\t\"", 0) == JsonStep(val: JsonText(t: "\x08\x0c\r\t"), at: 10, err: "")
+  ex json_read_text("\"\\u0436\"", 0) == JsonStep(val: JsonText(t: "ж"), at: 8, err: "")
+  ex json_read_text("\"\\ud83d\\ude00\"", 0) == JsonStep(val: JsonText(t: "😀"), at: 14, err: "")
+  ex json_read_text("\"\\ud83d\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ud83d\\u0041\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ude00\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\uZZZZ\"", 0) == json_fail("\\u needs four hex digits", 1)
+  ex json_read_text("\"\\q\"", 0) == json_fail("unknown escape \\q", 1)
+  ex json_read_text("\"ab", 0) == json_fail("the text is not closed with \"", 0)
+  ex json_read_text("\"a\nb\"", 0) == json_fail("a raw control character inside text; write it as \\n, \\t, \\u00XX", 2)
+  ex json_read_text("\"ё\"", 0) == JsonStep(val: JsonText(t: "ё"), at: 4, err: "")
+  ex json_read_text("\"\\", 0) == json_fail("the text is not closed with \"", 0)
+  ex json_read_text("\"\x1f\"", 0) == json_fail("a raw control character inside text; write it as \\n, \\t, \\u00XX", 1)
+  ex json_read_text("\" \"", 0) == JsonStep(val: JsonText(t: " "), at: 3, err: "")
+  ex json_read_text("\"\"", 0) == JsonStep(val: JsonText(t: ""), at: 2, err: "")
+  ex json_read_text("\"\\u0000\"", 0) == JsonStep(val: JsonText(t: "\0"), at: 8, err: "")
+  ex json_read_text("\"\\ud7ff\"", 0) == JsonStep(val: JsonText(t: text_from_code(55295)), at: 8, err: "")
+  ex json_read_text("\"\\ue000\"", 0) == JsonStep(val: JsonText(t: text_from_code(57344)), at: 8, err: "")
+  ex json_read_text("\"\\ud800\\udc00\"", 0) == JsonStep(val: JsonText(t: text_from_code(65536)), at: 14, err: "")
+  ex json_read_text("\"\\udbff\\udfff\"", 0) == JsonStep(val: JsonText(t: text_from_code(1114111)), at: 14, err: "")
+  ex json_read_text("\"\\udc00\\udc00\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\udfff\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ud800\\udbff\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ud800\\ue000\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ud800x\\udc00\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+  ex json_read_text("\"\\ud800\\x\"", 0) == json_fail("a lone surrogate \\u escape", 1)
+{
+  var parts: List[Text] = []
+  var start = i + 1
+  var j = i + 1
+  while j < len(t) {
+    let c = byte(t, j)
+    if c == '"' {
+      parts.push(slice(t, start, j))
+      return JsonStep(val: JsonText(t: join(parts, "")), at: j + 1, err: "")
+    }
+    if c < 32 {
+      return json_fail("a raw control character inside text; write it as \\n, \\t, \\u00XX", j)
+    }
+    if c == '\\' {
+      parts.push(slice(t, start, j))
+      if j + 1 >= len(t) {
+        return json_fail("the text is not closed with \"", i)
+      }
+      let e = byte(t, j + 1)
+      var step = 2
+      match e {
+        '"' => { parts.push("\"") }
+        '\\' => { parts.push("\\") }
+        '/' => { parts.push("/") }
+        'b' => { parts.push("\x08") }
+        'f' => { parts.push("\x0c") }
+        'n' => { parts.push("\n") }
+        'r' => { parts.push("\r") }
+        't' => { parts.push("\t") }
+        'u' => {
+          let u = json_hex4(t, j + 2)
+          if u < 0 {
+            return json_fail("\\u needs four hex digits", j)
+          }
+          step = 6
+          if u >= 55296 and u <= 57343 {
+            // a surrogate: must be a high one followed by \u and a low one
+            let lo = json_hex4(t, j + 8)
+            if u > 56319 or j + 7 >= len(t) or byte(t, j + 6) != '\\' or byte(t, j + 7) != 'u' or lo < 56320 or lo > 57343 {
+              return json_fail("a lone surrogate \\u escape", j)
+            }
+            parts.push(text_from_code(65536 + (u - 55296) * 1024 + (lo - 56320)))
+            step = 12
+          } else {
+            parts.push(text_from_code(u))
+          }
+        }
+        else => { return json_fail("unknown escape \\" + from_byte(e), j) }
+      }
+      j = j + step
+      start = j
+    } else {
+      j = j + 1
+    }
+  }
+  return json_fail("the text is not closed with \"", i)
+}
+
+fn json_is_digit_at(t: Text, i: Int) -> Bool
+  ex json_is_digit_at("a1", 1) == true
+  ex json_is_digit_at("a1", 0) == false
+  ex json_is_digit_at("a1", 2) == false
+  ex json_is_digit_at("9", 0) == true
+  ex json_is_digit_at("0", 0) == true
+  ex json_is_digit_at("/", 0) == false
+  ex json_is_digit_at(":", 0) == false
+{
+  return i < len(t) and byte(t, i) >= '0' and byte(t, i) <= '9'
+}
+
+// a number by the JSON grammar: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?
+fn json_read_num(t: Text, i: Int) -> JsonStep
+  ex json_read_num("12", 0) == JsonStep(val: JsonNum(n: 12.0), at: 2, err: "")
+  ex json_read_num("-0.5e2,", 0) == JsonStep(val: JsonNum(n: -50.0), at: 6, err: "")
+  ex json_read_num("1E+2", 0) == JsonStep(val: JsonNum(n: 100.0), at: 4, err: "")
+  ex json_read_num("2e-1", 0) == JsonStep(val: JsonNum(n: 0.2), at: 4, err: "")
+  ex json_read_num("0", 0) == JsonStep(val: JsonNum(n: 0.0), at: 1, err: "")
+  ex json_read_num("01", 0) == json_fail("a number cannot start with 0 followed by digits", 0)
+  ex json_read_num("-", 0) == json_fail("a number needs digits", 0)
+  ex json_read_num("1.", 0) == json_fail("a number needs digits after the point", 0)
+  ex json_read_num("1e", 0) == json_fail("a number needs digits after the exponent", 0)
+  ex json_read_num("1.5", 0) == JsonStep(val: JsonNum(n: 1.5), at: 3, err: "")
+  ex json_read_num("x 7", 2) == JsonStep(val: JsonNum(n: 7.0), at: 3, err: "")
+  ex json_read_num("1e999", 0) == json_fail("this number does not fit a Float", 0)
+  ex json_read_num("1.7976931348623157e308", 0) == JsonStep(val: JsonNum(n: 1.7976931348623157e308), at: 22, err: "")
+  ex json_read_num("", 0) == json_fail("a number needs digits", 0)
+{
+  var j = i
+  if j < len(t) and byte(t, j) == '-' {
+    j = j + 1
+  }
+  if not json_is_digit_at(t, j) {
+    return json_fail("a number needs digits", i)
+  }
+  if byte(t, j) == '0' and json_is_digit_at(t, j + 1) {
+    return json_fail("a number cannot start with 0 followed by digits", i)
+  }
+  while json_is_digit_at(t, j) {
+    j = j + 1
+  }
+  if j < len(t) and byte(t, j) == '.' {
+    j = j + 1
+    if not json_is_digit_at(t, j) {
+      return json_fail("a number needs digits after the point", i)
+    }
+    while json_is_digit_at(t, j) {
+      j = j + 1
+    }
+  }
+  if j < len(t) and (byte(t, j) == 'e' or byte(t, j) == 'E') {
+    j = j + 1
+    if j < len(t) and (byte(t, j) == '+' or byte(t, j) == '-') {
+      j = j + 1
+    }
+    if not json_is_digit_at(t, j) {
+      return json_fail("a number needs digits after the exponent", i)
+    }
+    while json_is_digit_at(t, j) {
+      j = j + 1
+    }
+  }
+  match parse_float(slice(t, i, j)) {
+    some(x) => {
+      if abs(x) > 1.7976931348623157e308 {        // parse_float overflows to infinity
+        return json_fail("this number does not fit a Float", i)
+      }
+      return JsonStep(val: JsonNum(n: x), at: j, err: "")
+    }
+    none => { trap("the JSON number grammar is a subset of parse_float") }
+  }
+}
+
+fn json_read_word(t: Text, i: Int, word: Text, val: Json) -> JsonStep
+  ex json_read_word("true", 0, "true", JsonBool(b: true)) == JsonStep(val: JsonBool(b: true), at: 4, err: "")
+  ex json_read_word("tru", 0, "true", JsonBool(b: true)) == json_fail("expected true", 0)
+{
+  if starts_with(slice(t, i, len(t)), word) {
+    return JsonStep(val: val, at: i + len(word), err: "")
+  }
+  return json_fail("expected " + word, i)
+}
+
+// any value starting at i (after spaces)
+fn json_read(t: Text, i: Int, depth: Int) -> JsonStep
+  ex json_read("null", 0, 0) == JsonStep(val: JsonNull, at: 4, err: "")
+  ex json_read(" false", 0, 0) == JsonStep(val: JsonBool(b: false), at: 6, err: "")
+  ex json_read("[1, \"a\"]", 0, 0) == JsonStep(val: JsonList(items: [JsonNum(n: 1.0), JsonText(t: "a")]), at: 8, err: "")
+  ex json_read("[]", 0, 0) == JsonStep(val: JsonList(items: []), at: 2, err: "")
+  ex json_read("{}", 0, 0) == JsonStep(val: JsonObj(fields: []), at: 2, err: "")
+  ex json_read("{\"a\": 1}", 0, 0) == JsonStep(val: JsonObj(fields: [JsonField(key: "a", val: JsonNum(n: 1.0))]), at: 8, err: "")
+  ex json_read("[1 2]", 0, 0) == json_fail("expected , or ] in a list", 3)
+  ex json_read("[1,]", 0, 0) == json_fail("expected a value", 3)
+  ex json_read("{\"a\" 1}", 0, 0) == json_fail("expected : after the key", 5)
+  ex json_read("{\"a\":1,}", 0, 0) == json_fail("expected a \"key\"", 7)
+  ex json_read("{\"a\":1 \"b\":2}", 0, 0) == json_fail("expected , or } in an object", 7)
+  ex json_read("{1:2}", 0, 0) == json_fail("expected a \"key\"", 1)
+  ex json_read("", 0, 0) == json_fail("expected a value", 0)
+  ex json_read("[[1]]", 0, 499) == json_fail("nested deeper than 500 levels", 1)
+  ex json_read("{\"a\":1}", 0, 499) == json_fail("nested deeper than 500 levels", 5)
+  ex json_read("[", 0, 0) == json_fail("expected a value", 1)
+  ex json_read("{", 0, 0) == json_fail("expected a \"key\"", 1)
+  ex json_read("{\"a\":", 0, 0) == json_fail("expected a value", 5)
+  ex json_read("[1", 0, 0) == json_fail("expected , or ] in a list", 2)
+  ex json_read("{\"a\":1", 0, 0) == json_fail("expected , or } in an object", 6)
+  ex json_read("[\"x]", 0, 0) == json_fail("the text is not closed with \"", 1)
+  ex json_read("{\"x:1}", 0, 0) == json_fail("the text is not closed with \"", 1)
+  ex json_read("[-]", 0, 0) == json_fail("a number needs digits", 1)
+  ex json_read("{\"a\":-}", 0, 0) == json_fail("a number needs digits", 5)
+  ex json_read("[1, 2]", 0, 0) == JsonStep(val: JsonList(items: [JsonNum(n: 1.0), JsonNum(n: 2.0)]), at: 6, err: "")
+  ex json_read("{\"a\":1,\"b\":2}", 0, 0) == JsonStep(val: JsonObj(fields: [JsonField(key: "a", val: JsonNum(n: 1.0)), JsonField(key: "b", val: JsonNum(n: 2.0))]), at: 13, err: "")
+  ex json_read("[1]", 0, 498) == JsonStep(val: JsonList(items: [JsonNum(n: 1.0)]), at: 3, err: "")
+  ex json_read("x", 0, 0) == json_fail("expected a value", 0)
+  ex json_read("0", 0, 0) == JsonStep(val: JsonNum(n: 0.0), at: 1, err: "")
+  ex json_read("9", 0, 0) == JsonStep(val: JsonNum(n: 9.0), at: 1, err: "")
+  ex json_read("/", 0, 0) == json_fail("expected a value", 0)
+  ex json_read(":", 0, 0) == json_fail("expected a value", 0)
+  ex json_read("{\"a\":1, \"b\":2}", 0, 0) == JsonStep(val: JsonObj(fields: [JsonField(key: "a", val: JsonNum(n: 1.0)), JsonField(key: "b", val: JsonNum(n: 2.0))]), at: 14, err: "")
+  ex json_read("{\"a\"", 0, 0) == json_fail("expected : after the key", 4)
+  ex json_read("{\"a\":[1]}", 0, 497) == JsonStep(val: JsonObj(fields: [JsonField(key: "a", val: JsonList(items: [JsonNum(n: 1.0)]))]), at: 9, err: "")
+{
+  let j = json_skip_ws(t, i)
+  if j >= len(t) {
+    return json_fail("expected a value", j)
+  }
+  if depth >= json_max_depth {
+    return json_fail("nested deeper than 500 levels", j)
+  }
+  let c = byte(t, j)
+  if c == '"' {
+    return json_read_text(t, j)
+  }
+  if c == '-' or (c >= '0' and c <= '9') {
+    return json_read_num(t, j)
+  }
+  match c {
+    't' => { return json_read_word(t, j, "true", JsonBool(b: true)) }
+    'f' => { return json_read_word(t, j, "false", JsonBool(b: false)) }
+    'n' => { return json_read_word(t, j, "null", JsonNull) }
+    '[' => {
+      var items: List[Json] = []
+      var k = json_skip_ws(t, j + 1)
+      if k < len(t) and byte(t, k) == ']' {
+        return JsonStep(val: JsonList(items: items), at: k + 1, err: "")
+      }
+      while true {
+        let s = json_read(t, k, depth + 1)
+        if s.err != "" {
+          return s
+        }
+        items.push(s.val)
+        k = json_skip_ws(t, s.at)
+        if k < len(t) and byte(t, k) == ',' {
+          k = k + 1
+        } else if k < len(t) and byte(t, k) == ']' {
+          return JsonStep(val: JsonList(items: items), at: k + 1, err: "")
+        } else {
+          return json_fail("expected , or ] in a list", k)
+        }
+      }
+    }
+    '{' => {
+      var fields: List[JsonField] = []
+      var k = json_skip_ws(t, j + 1)
+      if k < len(t) and byte(t, k) == '}' {
+        return JsonStep(val: JsonObj(fields: fields), at: k + 1, err: "")
+      }
+      while true {
+        k = json_skip_ws(t, k)
+        if k >= len(t) or byte(t, k) != '"' {
+          return json_fail("expected a \"key\"", k)
+        }
+        let ks = json_read_text(t, k)
+        if ks.err != "" {
+          return ks
+        }
+        k = json_skip_ws(t, ks.at)
+        if k >= len(t) or byte(t, k) != ':' {
+          return json_fail("expected : after the key", k)
+        }
+        let vs = json_read(t, k + 1, depth + 1)
+        if vs.err != "" {
+          return vs
+        }
+        fields.push(JsonField(key: or_else(json_text(ks.val), ""), val: vs.val))
+        k = json_skip_ws(t, vs.at)
+        if k < len(t) and byte(t, k) == ',' {
+          k = k + 1
+        } else if k < len(t) and byte(t, k) == '}' {
+          return JsonStep(val: JsonObj(fields: fields), at: k + 1, err: "")
+        } else {
+          return json_fail("expected , or } in an object", k)
+        }
+      }
+    }
+    else => { return json_fail("expected a value", j) }
+  }
+}
+
+fn json_whole(t: Text) -> JsonStep
+  ex json_whole(" [1] ") == JsonStep(val: JsonList(items: [JsonNum(n: 1.0)]), at: 4, err: "")
+  ex json_whole("1 2") == json_fail("extra text after the value", 2)
+  ex json_whole("[") == json_fail("expected a value", 1)
+  ex json_whole(text_repeat("[", 500) + text_repeat("]", 500)).err == ""
+  ex json_whole(text_repeat("[", 501) + text_repeat("]", 501)).err == "nested deeper than 500 levels"
+{
+  let s = json_read(t, 0, 0)
+  if s.err != "" {
+    return s
+  }
+  let e = json_skip_ws(t, s.at)
+  if e != len(t) {
+    return json_fail("extra text after the value", e)
+  }
+  return s
+}
+
+// the value, or none if the text is not JSON (json_error says why)
+fn json_parse(t: Text) -> Opt[Json]
+  ex json_parse("{\"a\": [true, null]}") == some(JsonObj(fields: [JsonField(key: "a", val: JsonList(items: [JsonBool(b: true), JsonNull]))]))
+  ex json_parse("{,}") == none
+{
+  let s = json_whole(t)
+  if s.err != "" {
+    return none
+  }
+  return some(s.val)
+}
+
+// line and column (from 1) of byte i
+fn json_line_col(t: Text, i: Int) -> Text
+  ex json_line_col("ab\ncd", 4) == "line 2, column 2"
+  ex json_line_col("ab", 0) == "line 1, column 1"
+  ex json_line_col("ab\n", 3) == "line 2, column 1"
+  ex json_line_col("\nx", 1) == "line 2, column 1"
+{
+  var line = 1
+  var col = 1
+  for k in 0..i {
+    if byte(t, k) == '\n' {
+      line = line + 1
+      col = 1
+    } else {
+      col = col + 1
+    }
+  }
+  return "line " + show(line) + ", column " + show(col)
+}
+
+// "" if the text is valid JSON, otherwise what is wrong and where
+fn json_error(t: Text) -> Text
+  ex json_error("[1, 2]") == ""
+  ex json_error("[1,\n 2,]") == "expected a value at line 2, column 4"
+{
+  let s = json_whole(t)
+  if s.err == "" {
+    return ""
+  }
+  return s.err + " at " + json_line_col(t, s.at)
+}
+
+// JSON text for a string: quotes and escapes
+fn json_quote(t: Text) -> Text
+  ex json_quote("a\"b\\c\nd") == "\"a\\\"b\\\\c\\nd\""
+  ex json_quote("ё\t\r\x08\x0c") == "\"ё\\t\\r\\b\\f\""
+  ex json_quote("\x01") == "\"\\u0001\""
+  ex json_quote("\x1f") == "\"\\u001f\""
+  ex json_quote("\x10") == "\"\\u0010\""
+  ex json_quote(" ") == "\" \""
+  ex json_quote("/") == "\"/\""
+{
+  var parts: List[Text] = ["\""]
+  var start = 0
+  for i in 0..len(t) {
+    let c = byte(t, i)
+    var esc = ""
+    match c {
+      '"' => { esc = "\\\"" }
+      '\\' => { esc = "\\\\" }
+      '\n' => { esc = "\\n" }
+      '\r' => { esc = "\\r" }
+      '\t' => { esc = "\\t" }
+      8 => { esc = "\\b" }
+      12 => { esc = "\\f" }
+      else => {
+        if c < 32 {
+          esc = "\\u00" + slice("0123456789abcdef", c / 16, c / 16 + 1) + slice("0123456789abcdef", c % 16, c % 16 + 1)
+        }
+      }
+    }
+    if esc != "" {
+      parts.push(slice(t, start, i))
+      parts.push(esc)
+      start = i + 1
+    }
+  }
+  parts.push(slice(t, start, len(t)))
+  parts.push("\"")
+  return join(parts, "")
+}
+
+// a number as JSON writes it: whole numbers without ".0"; infinity and NaN have no JSON form → null
+fn json_num_text(x: Float) -> Text
+  ex json_num_text(3.0) == "3"
+  ex json_num_text(-0.0) == "-0"
+  ex json_num_text(0.0) == "0"
+  ex json_num_text(-2.5) == "-2.5"
+  ex json_num_text(0.1) == "0.1"
+  ex json_num_text(1e300) == "1e+300"
+  ex json_num_text(1e300 * 1e300) == "null"
+  ex json_num_text(999999999999999.0) == "999999999999999"
+  ex json_num_text(1000000000000000.0) == "1e+15"
+  ex json_num_text(-999999999999999.0) == "-999999999999999"
+  ex json_num_text(-1000000000000000.0) == "-1e+15"
+{
+  let s = show(x)
+  if contains(s, "inf") or contains(s, "nan") {
+    return "null"
+  }
+  if abs(x) < 1000000000000000.0 and float(trunc(x)) == x {
+    if trunc(x) == 0 and starts_with(s, "-") {
+      return "-0"                                 // keep the sign of -0.0, as JSON writers do
+    }
+    return show(trunc(x))
+  }
+  return s
+}
+
+// compact JSON text
+fn json_show(j: Json) -> Text
+  ex json_show(JsonObj(fields: [JsonField(key: "a", val: JsonList(items: [JsonNum(n: 1.0), JsonNull, JsonBool(b: false)]))])) == "{\"a\":[1,null,false]}"
+  ex json_show(JsonText(t: "x\"")) == "\"x\\\"\""
+  ex json_show(JsonBool(b: true)) == "true"
+  ex json_show(JsonObj(fields: [JsonField(key: "a", val: JsonNull), JsonField(key: "b", val: JsonNull)])) == "{\"a\":null,\"b\":null}"
+  ex json_show(JsonList(items: [])) == "[]"
+{
+  return json_write(j, -1, 0)
+}
+
+// indented JSON text (two spaces), for people
+fn json_pretty(j: Json) -> Text
+  ex json_pretty(JsonObj(fields: [JsonField(key: "a", val: JsonList(items: [JsonNum(n: 1.0), JsonNum(n: 2.0)])), JsonField(key: "b", val: JsonObj(fields: []))])) == "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {}\n}"
+  ex json_pretty(JsonList(items: [])) == "[]"
+{
+  return json_write(j, 2, 0)
+}
+
+// indent < 0: compact; otherwise that many spaces per level
+fn json_write(j: Json, indent: Int, level: Int) -> Text
+  ex json_write(JsonList(items: [JsonNum(n: 1.0)]), -1, 0) == "[1]"
+  ex json_write(JsonList(items: [JsonNum(n: 1.0)]), 2, 1) == "[\n    1\n  ]"
+  ex json_write(JsonObj(fields: [JsonField(key: "k", val: JsonNull)]), 1, 0) == "{\n \"k\": null\n}"
+  ex json_write(JsonList(items: [JsonNum(n: 1.0)]), 0, 0) == "[\n1\n]"
+  ex json_write(JsonList(items: [JsonList(items: [JsonNull])]), 2, 0) == "[\n  [\n    null\n  ]\n]"
+  ex json_write(JsonObj(fields: [JsonField(key: "a", val: JsonObj(fields: [JsonField(key: "b", val: JsonNull)]))]), 2, 0) == "{\n  \"a\": {\n    \"b\": null\n  }\n}"
+{
+  var nl = ""
+  var pad = ""
+  var pad_in = ""
+  var colon = ":"
+  if indent >= 0 {
+    nl = "\n"
+    pad = text_repeat(" ", indent * level)
+    pad_in = text_repeat(" ", indent * (level + 1))
+    colon = ": "
+  }
+  match j {
+    JsonNull => { return "null" }
+    JsonBool(b) => {
+      if b {
+        return "true"
+      }
+      return "false"
+    }
+    JsonNum(n) => { return json_num_text(n) }
+    JsonText(t) => { return json_quote(t) }
+    JsonList(items) => {
+      if len(items) == 0 {
+        return "[]"
+      }
+      var parts: List[Text] = []
+      for it in items {
+        parts.push(pad_in + json_write(it, indent, level + 1))
+      }
+      return "[" + nl + join(parts, "," + nl) + nl + pad + "]"
+    }
+    JsonObj(fields) => {
+      if len(fields) == 0 {
+        return "{}"
+      }
+      var parts: List[Text] = []
+      for f in fields {
+        parts.push(pad_in + json_quote(f.key) + colon + json_write(f.val, indent, level + 1))
+      }
+      return "{" + nl + join(parts, "," + nl) + nl + pad + "}"
+    }
+  }
+}
+
+// ---- reading values out
+
+// the value of a key in an object (the last one, if a key repeats); none if not an object or no such key
+fn json_get(j: Json, key: Text) -> Opt[Json]
+  ex json_get(JsonObj(fields: [JsonField(key: "a", val: JsonNum(n: 1.0))]), "a") == some(JsonNum(n: 1.0))
+  ex json_get(JsonObj(fields: [JsonField(key: "a", val: JsonNull), JsonField(key: "a", val: JsonBool(b: true))]), "a") == some(JsonBool(b: true))
+  ex json_get(JsonObj(fields: []), "a") == none
+  ex json_get(JsonNull, "a") == none
+{
+  var found: Opt[Json] = none
+  match j {
+    JsonObj(fields) => {
+      for f in fields {
+        if f.key == key {
+          found = some(f.val)
+        }
+      }
+    }
+    JsonNull, JsonBool, JsonNum, JsonText, JsonList => { }
+  }
+  return found
+}
+
+// element i of a list; none if not a list or out of range
+fn json_at(j: Json, i: Int) -> Opt[Json]
+  ex json_at(JsonList(items: [JsonNull, JsonBool(b: true)]), 1) == some(JsonBool(b: true))
+  ex json_at(JsonList(items: [JsonNull]), 1) == none
+  ex json_at(JsonList(items: [JsonNull]), -1) == none
+  ex json_at(JsonList(items: [JsonNull]), 0) == some(JsonNull)
+  ex json_at(JsonNull, 0) == none
+{
+  match j {
+    JsonList(items) => {
+      if i >= 0 and i < len(items) {
+        return some(items[i])
+      }
+      return none
+    }
+    JsonNull, JsonBool, JsonNum, JsonText, JsonObj => { return none }
+  }
+}
+
+// follow a dotted path: "users.0.name" — a part that is a number indexes a list, otherwise a key
+fn json_path(j: Json, path: Text) -> Opt[Json]
+  ex json_path(JsonObj(fields: [JsonField(key: "u", val: JsonList(items: [JsonObj(fields: [JsonField(key: "n", val: JsonText(t: "ёж"))])]))]), "u.0.n") == some(JsonText(t: "ёж"))
+  ex json_path(JsonNull, "") == some(JsonNull)
+  ex json_path(JsonList(items: [JsonNull]), "1") == none
+  ex json_path(JsonObj(fields: []), "a.b") == none
+  ex json_path(JsonObj(fields: [JsonField(key: "0", val: JsonNull)]), "0") == some(JsonNull)
+{
+  if path == "" {
+    return some(j)
+  }
+  var cur = j
+  for part in split(path, ".") {
+    var next: Opt[Json] = none
+    match parse_int(part) {
+      some(i) => {
+        next = json_at(cur, i)
+        if next == none {
+          next = json_get(cur, part)      // an object may have the key "0"
+        }
+      }
+      none => { next = json_get(cur, part) }
+    }
+    match next {
+      some(v) => { cur = v }
+      none => { return none }
+    }
+  }
+  return some(cur)
+}
+
+fn json_text(j: Json) -> Opt[Text]
+  ex json_text(JsonText(t: "a")) == some("a")
+  ex json_text(JsonNum(n: 1.0)) == none
+{
+  match j {
+    JsonText(t) => { return some(t) }
+    JsonNull, JsonBool, JsonNum, JsonList, JsonObj => { return none }
+  }
+}
+
+fn json_num(j: Json) -> Opt[Float]
+  ex json_num(JsonNum(n: 1.5)) == some(1.5)
+  ex json_num(JsonText(t: "1")) == none
+{
+  match j {
+    JsonNum(n) => { return some(n) }
+    JsonNull, JsonBool, JsonText, JsonList, JsonObj => { return none }
+  }
+}
+
+// a whole number as Int (none if not a number, not whole or out of Int range)
+fn json_int(j: Json) -> Opt[Int]
+  ex json_int(JsonNum(n: 42.0)) == some(42)
+  ex json_int(JsonNum(n: -3.0)) == some(-3)
+  ex json_int(JsonNum(n: 4.5)) == none
+  ex json_int(JsonNum(n: 1e19)) == none
+  ex json_int(JsonNum(n: -1e19)) == none
+  ex json_int(JsonNum(n: 9e18)) == some(9000000000000000000)
+  ex json_int(JsonNum(n: -9e18)) == some(-9000000000000000000)
+  ex json_int(JsonNull) == none
+{
+  match j {
+    JsonNum(n) => {
+      if n >= 9.2e18 or n <= -9.2e18 {
+        return none
+      }
+      if float(trunc(n)) != n {
+        return none
+      }
+      return some(trunc(n))
+    }
+    JsonNull, JsonBool, JsonText, JsonList, JsonObj => { return none }
+  }
+}
+
+fn json_bool(j: Json) -> Opt[Bool]
+  ex json_bool(JsonBool(b: false)) == some(false)
+  ex json_bool(JsonNull) == none
+{
+  match j {
+    JsonBool(b) => { return some(b) }
+    JsonNull, JsonNum, JsonText, JsonList, JsonObj => { return none }
+  }
+}
+
+// the elements of a list ([] for anything else)
+fn json_items(j: Json) -> List[Json]
+  ex json_items(JsonList(items: [JsonNull])) == [JsonNull]
+  ex json_items(JsonNull) == []
+{
+  match j {
+    JsonList(items) => { return items }
+    JsonNull, JsonBool, JsonNum, JsonText, JsonObj => { return [] }
+  }
+}
+
+// the keys of an object in written order ([] for anything else)
+fn json_keys(j: Json) -> List[Text]
+  ex json_keys(JsonObj(fields: [JsonField(key: "b", val: JsonNull), JsonField(key: "a", val: JsonNull)])) == ["b", "a"]
+  ex json_keys(JsonNull) == []
+{
+  var out: List[Text] = []
+  match j {
+    JsonObj(fields) => {
+      for f in fields {
+        out.push(f.key)
+      }
+    }
+    JsonNull, JsonBool, JsonNum, JsonText, JsonList => { }
+  }
+  return out
+}
+
+// shortcuts: the text / int at a dotted path, or a default
+fn json_text_at(j: Json, path: Text, default: Text) -> Text
+  ex json_text_at(JsonObj(fields: [JsonField(key: "a", val: JsonText(t: "x"))]), "a", "?") == "x"
+  ex json_text_at(JsonObj(fields: [JsonField(key: "a", val: JsonNum(n: 1.0))]), "a", "?") == "?"
+  ex json_text_at(JsonNull, "a", "?") == "?"
+{
+  match json_path(j, path) {
+    some(v) => { return or_else(json_text(v), default) }
+    none => { return default }
+  }
+}
+
+fn json_int_at(j: Json, path: Text, default: Int) -> Int
+  ex json_int_at(JsonObj(fields: [JsonField(key: "n", val: JsonNum(n: 7.0))]), "n", -1) == 7
+  ex json_int_at(JsonObj(fields: [JsonField(key: "n", val: JsonText(t: "7"))]), "n", -1) == -1
+  ex json_int_at(JsonNull, "n", -1) == -1
+{
+  match json_path(j, path) {
+    some(v) => { return or_else(json_int(v), default) }
+    none => { return default }
+  }
+}
+
+// ---- building
+
+// the object with `key` set to `val` (replaced in place if present, else added at the end);
+// anything that is not an object becomes an object with that one key
+fn json_set(j: Json, key: Text, val: Json) -> Json
+  ex json_set(JsonObj(fields: [JsonField(key: "a", val: JsonNull), JsonField(key: "b", val: JsonNull)]), "a", JsonBool(b: true)) == JsonObj(fields: [JsonField(key: "a", val: JsonBool(b: true)), JsonField(key: "b", val: JsonNull)])
+  ex json_set(JsonObj(fields: [JsonField(key: "a", val: JsonNull)]), "b", JsonNull) == JsonObj(fields: [JsonField(key: "a", val: JsonNull), JsonField(key: "b", val: JsonNull)])
+  ex json_set(JsonNull, "k", JsonNum(n: 1.0)) == JsonObj(fields: [JsonField(key: "k", val: JsonNum(n: 1.0))])
+{
+  var out: List[JsonField] = []
+  var done = false
+  match j {
+    JsonObj(fields) => {
+      for f in fields {
+        if f.key == key {
+          out.push(JsonField(key: key, val: val))
+          done = true
+        } else {
+          out.push(f)
+        }
+      }
+    }
+    JsonNull, JsonBool, JsonNum, JsonText, JsonList => { }
+  }
+  if not done {
+    out.push(JsonField(key: key, val: val))
+  }
+  return JsonObj(fields: out)
+}
+
+// a field for an object: json_field("n", JsonNum(n: 1.0))
+fn json_field(key: Text, val: Json) -> JsonField
+  ex json_field("n", JsonNull) == JsonField(key: "n", val: JsonNull)
+{
+  return JsonField(key: key, val: val)
+}
