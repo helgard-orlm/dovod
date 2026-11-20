@@ -1,0 +1,23 @@
+// module files end to end, in a fresh folder given as the argument
+use files
+
+fn main() uses io, env, fs_read, fs_write, files_delete {
+  let root = args()[0]
+  let a = files_mkdir(files_join(root, "x/y/z"))
+  let b = write_file(files_join(root, "x/one.txt"), "hello")
+  let c = files_append(files_join(root, "x/one.txt"), " world")
+  let d = files_append(files_join(root, "x/y/ёж.txt"), "1")
+  print(show([a, b, c, d]))
+  print(show(files_list(files_join(root, "x"))) + " " + show(files_list(files_join(root, "nope"))))
+  print(show(files_size(files_join(root, "x/one.txt"))) + " " + show(files_size(files_join(root, "x"))))
+  print(show(files_walk(root)))
+  let r1 = files_rename(files_join(root, "x/one.txt"), files_join(root, "x/y/ёж.txt"))
+  let r2 = files_rename(files_join(root, "x/one.txt"), files_join(root, "x/two.txt"))
+  print(show([r1, r2, files_exists(files_join(root, "x/two.txt")), files_is_dir(files_join(root, "x/y"))]))
+  let d1 = files_delete(files_join(root, "x/y"))
+  let d2 = files_delete(files_join(root, "x/y/z"))
+  let d3 = files_delete(files_join(root, "x/two.txt"))
+  print(show([d1, d2, d3]) + " " + show(files_walk(root)))
+  let m = or_else(files_mtime(files_join(root, "x")), 0)
+  print(show(m > 1700000000000))
+}

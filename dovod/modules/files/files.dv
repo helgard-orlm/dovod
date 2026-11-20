@@ -1,0 +1,169 @@
+// Module `files`: folders and file facts beyond the core's read_file/write_file.
+//
+//   use files
+//   match files_list("photos") {                  // names in the folder, sorted; none if it cannot be read
+//     some(names) => { for n in names { ... files_join("photos", n) ... } }
+//     none => { ... }
+//   }
+//   files_mkdir("out/2026/11")                     // with the missing parents
+//   files_append("log.txt", "one more line\n")
+//   files_walk("src")                              // every file below, as paths relative to "src"
+//
+// Effects: looking (list, size, time, exists) is the core `fs_read`; creating and appending is the core
+// `fs_write`; renaming is `fs_write` too, but it NEVER replaces an existing file (it returns false).
+// Deleting is its own effect, `files_delete`, so a program that can delete says so in its ledger — and
+// even then only one file or one EMPTY folder per call: there is no recursive delete here.
+// Paths use "/" (Windows accepts it too). Names are bytes (UTF-8); sorting is by bytes.
+module files
+effect files_delete "delete files and empty folders"
+native "files.h"
+
+extern fn files_exists(path: Text) -> Bool uses fs_read
+extern fn files_is_dir(path: Text) -> Bool uses fs_read
+extern fn files_size(path: Text) -> Opt[Int] uses fs_read          // bytes; none for a folder or nothing
+extern fn files_mtime(path: Text) -> Opt[Int] uses fs_read         // last change, ms since 1970 (as now_ms)
+extern fn files_list_raw(path: Text) -> List[Text] uses fs_read    // raw; use files_list
+extern fn files_mkdir(path: Text) -> Bool uses fs_write            // true if the folder exists afterwards
+extern fn files_append(path: Text, text: Text) -> Bool uses fs_write
+extern fn files_rename(from: Text, to: Text) -> Bool uses fs_write // false if `to` exists: never replaces
+extern fn files_delete(path: Text) -> Bool uses files_delete       // a file or an EMPTY folder
+extern fn files_cwd() -> Text uses fs_read                         // the current folder ("/" separators)
+
+// the names in a folder, sorted (no "." or ".."); none if it is not a readable folder
+fn files_list(path: Text) -> Opt[List[Text]] uses fs_read {
+  return files_list_parse(files_list_raw(path))
+}
+
+fn files_list_parse(raw: List[Text]) -> Opt[List[Text]]
+  ex files_list_parse(["1", "a", "b"]) == some(["a", "b"])
+  ex files_list_parse(["1"]) == some([])
+  ex files_list_parse(["0"]) == none
+  ex files_list_parse([]) == none
+{
+  if len(raw) == 0 or raw[0] != "1" {
+    return none
+  }
+  return some(slice(raw, 1, len(raw)))
+}
+
+// every file (not folder) below `path`, as paths relative to it, sorted; unreadable folders are skipped
+fn files_walk(path: Text) -> List[Text] uses fs_read {
+  var out: List[Text] = []
+  var todo = [""]
+  while len(todo) > 0 {
+    let rel = todo[len(todo) - 1]
+    todo.pop()
+    match files_list(files_join(path, rel)) {
+      some(names) => {
+        for n in names {
+          let r = files_join(rel, n)
+          if files_is_dir(files_join(path, r)) {
+            todo.push(r)
+          } else {
+            out.push(r)
+          }
+        }
+      }
+      none => { }
+    }
+  }
+  return sort(out)
+}
+
+// ---- paths (pure)
+
+// a and b with one "/" between; an empty side gives the other
+fn files_join(a: Text, b: Text) -> Text
+  ex files_join("x", "y.txt") == "x/y.txt"
+  ex files_join("x/", "y") == "x/y"
+  ex files_join("", "y") == "y"
+  ex files_join("x", "") == "x"
+  ex files_join("x", "/y") == "x/y"
+  ex files_join("x\\", "y") == "x\\y"
+{
+  if a == "" {
+    return b
+  }
+  if b == "" {
+    return a
+  }
+  if ends_with(a, "/") or ends_with(a, "\\") {
+    return a + b
+  }
+  if starts_with(b, "/") {
+    return a + b
+  }
+  return a + "/" + b
+}
+
+// position of the last "/" or "\", or -1
+fn files_last_sep(p: Text) -> Int
+  ex files_last_sep("a/b/c") == 3
+  ex files_last_sep("a\\b") == 1
+  ex files_last_sep("abc") == -1
+  ex files_last_sep("/") == 0
+{
+  var i = len(p) - 1
+  while i >= 0 {
+    let c = byte(p, i)
+    if c == '/' or c == '\\' {
+      return i
+    }
+    i = i - 1
+  }
+  return -1
+}
+
+// the last part of a path: "a/b/c.txt" → "c.txt"
+fn files_name(p: Text) -> Text
+  ex files_name("a/b/c.txt") == "c.txt"
+  ex files_name("c.txt") == "c.txt"
+  ex files_name("a/") == ""
+{
+  return slice(p, files_last_sep(p) + 1, len(p))
+}
+
+// the folder part: "a/b/c.txt" → "a/b"; "c.txt" → ""; "/c" → "/"
+fn files_dir(p: Text) -> Text
+  ex files_dir("a/b/c.txt") == "a/b"
+  ex files_dir("c.txt") == ""
+  ex files_dir("/c") == "/"
+{
+  let i = files_last_sep(p)
+  if i < 0 {
+    return ""
+  }
+  if i == 0 {
+    return slice(p, 0, 1)
+  }
+  return slice(p, 0, i)
+}
+
+// the extension with its dot, lower case not changed: "x/a.tar.gz" → ".gz"; "a" → ""; ".bashrc" → ""
+fn files_ext(p: Text) -> Text
+  ex files_ext("x/a.tar.gz") == ".gz"
+  ex files_ext("a") == ""
+  ex files_ext(".bashrc") == ""
+  ex files_ext("d.v/a") == ""
+  ex files_ext("a.b") == ".b"
+{
+  let n = files_name(p)
+  var i = len(n) - 1
+  while i > 0 {
+    if byte(n, i) == '.' {
+      return slice(n, i, len(n))
+    }
+    i = i - 1
+  }
+  return ""
+}
+
+// the name without its extension: "x/a.tar.gz" → "a.tar"
+fn files_stem(p: Text) -> Text
+  ex files_stem("x/a.tar.gz") == "a.tar"
+  ex files_stem(".bashrc") == ".bashrc"
+  ex files_stem("a") == "a"
+{
+  let n = files_name(p)
+  return slice(n, 0, len(n) - len(files_ext(p)))
+}
